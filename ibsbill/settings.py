@@ -43,7 +43,8 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     "corsheaders",
-    'ebilling'
+    'ebilling',
+    'axes',
 ]
 
 MIDDLEWARE = [
@@ -55,7 +56,21 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     "corsheaders.middleware.CorsMiddleware",
+    'axes.middleware.AxesMiddleware',  # keep last
 ]
+
+# django-axes: brute-force login protection
+AUTHENTICATION_BACKENDS = [
+    'axes.backends.AxesStandaloneBackend',  # must be first
+    'django.contrib.auth.backends.ModelBackend',
+]
+AXES_FAILURE_LIMIT = 5
+AXES_COOLOFF_TIME = 1  # hours
+AXES_LOCKOUT_PARAMETERS = ['ip_address', 'username']
+AXES_RESET_ON_SUCCESS = True
+# Behind nginx the real client IP is in X-Forwarded-For (needs nginx to set it).
+AXES_IPWARE_META_PRECEDENCE_ORDER = ['HTTP_X_FORWARDED_FOR', 'REMOTE_ADDR']
+AXES_IPWARE_PROXY_COUNT = 1
 
 ROOT_URLCONF = 'ibsbill.urls'
 
