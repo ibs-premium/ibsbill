@@ -3,6 +3,21 @@
 from django.db import migrations, models
 
 
+def _column_exists(schema_editor, table, column):
+    with schema_editor.connection.cursor() as cursor:
+        cols = schema_editor.connection.introspection.get_table_description(cursor, table)
+    return any(c.name == column for c in cols)
+
+
+class SafeRemoveMeterCredited(migrations.RemoveField):
+    """RemoveField that tolerates DBs (e.g. the legacy live DB) where the
+    column was never created."""
+
+    def database_forwards(self, app_label, schema_editor, from_state, to_state):
+        if _column_exists(schema_editor, 'ebilling_ebill', 'meter_credited'):
+            super().database_forwards(app_label, schema_editor, from_state, to_state)
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -10,7 +25,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RemoveField(
+        SafeRemoveMeterCredited(
             model_name='ebill',
             name='meter_credited',
         ),
