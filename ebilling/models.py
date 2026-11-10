@@ -1,11 +1,41 @@
+import ipaddress
+
+from django.core.exceptions import ValidationError
 from django.db import models
+
+
+def split_networks(value):
+    """The addresses and ranges in a comma- or space-separated list, as ip_network objects."""
+    items = [item for item in str(value or '').replace(',', ' ').split() if item]
+    return [ipaddress.ip_network(item, strict=False) for item in items]
+
+
+def validate_ip_list(value):
+    """One or more IP addresses or ranges (e.g. 10.0.4.170, 10.0.5.0/24), separated by commas."""
+    try:
+        networks = split_networks(value)
+    except ValueError as exc:
+        raise ValidationError(f'Enter IP addresses or ranges separated by commas ({exc}).')
+    if not networks:
+        raise ValidationError('Enter at least one IP address.')
 
 
 class Application(models.Model):
     name = models.CharField(max_length=30, verbose_name='Name of Application')
     url = models.CharField(max_length=255, verbose_name='url of app')
-    key = models.CharField(max_length=17)
-    ip_address = models.GenericIPAddressField()
+    key = models.CharField(max_length=64)
+    ip_address = models.CharField(
+        max_length=255, validators=[validate_ip_list], verbose_name='IP addresses allowed',
+        help_text='Addresses the application calls from: one or more IP addresses or ranges, separated by '
+                  'commas, e.g. 10.0.4.170, 10.0.5.0/24')
+
+    def allows_ip(self, ip):
+        """True if `ip` is one of this application's registered addresses or inside one of its ranges."""
+        try:
+            address = ipaddress.ip_address(str(ip).strip())
+            return any(address in network for network in split_networks(self.ip_address))
+        except ValueError:
+            return False
 
     def __str__(self):
         return self.name

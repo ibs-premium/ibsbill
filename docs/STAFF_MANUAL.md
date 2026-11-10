@@ -221,9 +221,11 @@ A callback in this list is a record of what was received, not proof that a payme
 
 ## 9. Applications
 
-Only **registered applications** can request payments through the gateway. Each has a name, a web address, an IP address and a key. When an application asks for a payment, the gateway checks that the **key** matches and that the request comes from the registered **IP address**; otherwise it is refused.
+Only **registered applications** can request payments through the gateway. Each has a name, a web address, the **IP addresses** it calls from and a key. When an application asks for a payment, the gateway checks that the **key** matches and that the request comes from one of the registered **IP addresses**; otherwise it is refused.
 
-- **Register an application**: fill in the form on the right and select **Register**. Leave **Key** blank to generate one. Copy the key with the clipboard icon and give it to the system's developers.
+An application that runs on several servers needs all of their addresses. Enter them separated by commas, and use a range for a whole group, for example `10.0.4.170, 10.0.4.218, 10.0.5.0/24` (`/24` covers every address from `10.0.5.0` to `10.0.5.255`).
+
+- **Register an application**: fill in the form on the right and select **Register**. Leave **Key** blank to generate a long random one. Copy the key with the clipboard icon and give it to the system's developers.
 - **Edit**: change the details and select **Save changes**. If you change the key or the IP address, the application stops working until its developers update their side to match.
 - **Remove app**: on the edit page. The application can no longer request payments; its past transactions are kept.
 

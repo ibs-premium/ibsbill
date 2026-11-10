@@ -11,11 +11,12 @@ class ApplicationForm(forms.ModelForm):
         widgets = {
             'name': forms.TextInput(attrs={'class': 'form-control', 'placeholder': 'e.g. ebilling'}),
             'url': forms.TextInput(attrs={'class': 'form-control', 'placeholder': 'https://example.com'}),
-            'ip_address': forms.TextInput(attrs={'class': 'form-control', 'placeholder': '0.0.0.0'}),
+            'ip_address': forms.TextInput(attrs={'class': 'form-control', 'placeholder': '10.0.4.170, 10.0.5.0/24'}),
             'key': forms.TextInput(attrs={'class': 'form-control font-monospace'}),
         }
         help_texts = {
             'key': 'Leave blank to generate a new key automatically.',
+            'ip_address': 'One or more addresses or ranges, separated by commas.',
         }
 
     def __init__(self, *args, **kwargs):
@@ -23,8 +24,7 @@ class ApplicationForm(forms.ModelForm):
         self.fields['key'].required = False
 
     def clean_key(self):
-        # 16 hex chars fits the model's max_length of 17
-        return self.cleaned_data.get('key') or secrets.token_hex(8)
+        return self.cleaned_data.get('key') or secrets.token_hex(16)  # 32 random characters
 
 
 class StaffAuthenticationForm(AuthenticationForm):

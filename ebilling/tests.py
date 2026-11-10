@@ -23,7 +23,9 @@ def mtn_status_response(status, code=200, financial_id='FIN-1', payer=None):
     return {'success': True, 'status_code': 200, 'raw_response_text': json.dumps(body)}
 
 
-@override_settings(CACHES={'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}})
+# Pin the settings the tests rely on so a developer's .env can't change the outcome
+@override_settings(CACHES={'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}},
+                   ENFORCE_APP_IP=True, TRUSTED_PROXY_COUNT=1)
 class PaymentTestCase(TestCase):
     def setUp(self):
         cache.clear()  # don't let a cached MTN token leak between tests
@@ -695,3 +697,34 @@ class CallbackBackfillTests(PaymentTestCase):
         old.refresh_from_db(); junk.refresh_from_db()
         self.assertEqual((old.ebill, old.reference, old.claimed_status, old.outcome), (bill, bill.uuid, 'SUCCESSFUL', ''))
         self.assertEqual((junk.ebill, junk.reference), (None, ''))
+
+
+class ApplicationAddressTests(PaymentTestCase):
+    def app(self, ips):
+        return Application(name='a', url='u', key='k', ip_address=ips)
+
+    def test_several_addresses_and_ranges_are_allowed(self):
+        app = self.app('10.0.4.170, 10.0.4.218 10.0.5.0/24, 2001:db8::/32')
+        for ok in ('10.0.4.170', '10.0.4.218', '10.0.5.156', '10.0.5.1', '2001:db8::1'):
+            self.assertTrue(app.allows_ip(ok), ok)
+        for bad in ('10.0.4.171', '10.0.6.1', '203.0.113.9', '', 'not-an-ip', None):
+            self.assertFalse(app.allows_ip(bad), bad)
+
+    def test_form_checks_the_list(self):
+        from .forms import ApplicationForm
+        data = {'name': 'x', 'url': 'http://x', 'key': ''}
+        good = ApplicationForm(dict(data, ip_address='10.0.4.170, 10.0.5.0/24'))
+        self.assertTrue(good.is_valid(), good.errors)
+        self.assertEqual(len(good.cleaned_data['key']), 32)   # generated keys are long
+        for bad in ('', 'nonsense', '10.0.4.999', '10.0.4.0/99'):
+            self.assertFalse(ApplicationForm(dict(data, ip_address=bad)).is_valid(), bad)
+
+    @mock.patch('ebilling.mtn.get_account_holder_name', return_value='')
+    @mock.patch('ebilling.mtn.request_to_pay', return_value={'success': True, 'status_code': 202, 'message': 'ok'})
+    @mock.patch('ebilling.mtn.get_token', return_value='tok')
+    def test_bill_accepts_any_registered_server(self, _token, _pay, _lookup):
+        Application.objects.create(name='ebilling', url='u', key='k', ip_address='10.0.4.170, 10.0.5.0/24')
+        body = {'app': 'ebilling', 'app_key': 'k', 'amount': 5, 'momo_number': '0241234567', 'device_id': 'M1'}
+        for i, (ip, expected) in enumerate((('10.0.4.170', 200), ('10.0.5.156', 200), ('10.0.4.218', 403))):
+            r = post_json(self.client, '/bill/', dict(body, device_id=f'M{i}'), REMOTE_ADDR=ip)
+            self.assertEqual(r.status_code, expected, ip)

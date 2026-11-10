@@ -1,5 +1,4 @@
 import hmac
-import ipaddress
 import json
 import logging
 
@@ -29,13 +28,6 @@ def client_ip(request):
     return remote
 
 
-def _same_ip(a, b):
-    try:
-        return ipaddress.ip_address(str(a).strip()) == ipaddress.ip_address(str(b).strip())
-    except ValueError:
-        return False
-
-
 def authenticate_app(request, name, key):
     """The registered Application if `key` (and, unless disabled, the caller's IP) match, else None."""
     app = Application.objects.filter(name=name).first() if name else None
@@ -45,8 +37,8 @@ def authenticate_app(request, name, key):
     if not key_ok:
         logger.warning('Rejected /bill/ call for app %r: bad name or key (ip %s)', name, client_ip(request))
         return None
-    if settings.ENFORCE_APP_IP and not _same_ip(client_ip(request), app.ip_address):
-        logger.warning('Rejected /bill/ call for app %r: ip %s is not the registered %s',
+    if settings.ENFORCE_APP_IP and not app.allows_ip(client_ip(request)):
+        logger.warning('Rejected /bill/ call for app %r: ip %s is not in the registered %s',
                        name, client_ip(request), app.ip_address)
         return None
     return app
