@@ -14,6 +14,7 @@
     <div class="label">Collected <i data-lucide="banknote"></i></div>
     <div class="value positive">{{ totals.collected|money }}</div>
     <div class="sub">From successful payments</div>
+    <div class="sub">Less {{ fee_percent }}%: {{ totals.fee|money }} · <strong>Net {{ totals.net|money }}</strong></div>
   </div>
   <div class="panel stat">
     <div class="label">Transactions <i data-lucide="receipt"></i></div>

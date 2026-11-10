@@ -4,7 +4,7 @@
 {% block crumb %}Reports{% endblock %}
 {% block heading %}Reports{% endblock %}
 {% block actions %}
-  <button class="btn btn-ghost btn-sm no-print" type="button" onclick="window.print()"><i data-lucide="printer"></i> Print</button>
+  <a class="btn btn-brand btn-sm no-print" href="?{% if querystring %}{{ querystring }}&{% endif %}export=pdf"><i data-lucide="file-down"></i> Export PDF</a>
   <a class="btn btn-ghost btn-sm no-print" href="?{% if querystring %}{{ querystring }}&{% endif %}export=csv"><i data-lucide="download"></i> Export CSV</a>
 {% endblock %}
 
@@ -73,7 +73,6 @@
     <h2>{{ label }}</h2>
     <div class="muted">
       {{ start|date:"d M Y" }} – {{ end|date:"d M Y" }} · {{ app|default:"All applications" }}
-      <span class="print-only"> · Generated {{ generated|date:"d M Y, H:i" }} by {{ user.get_username }}</span>
     </div>
   </div>
   <div class="muted small">Compared with {{ prev_start|date:"d M Y" }} – {{ prev_end|date:"d M Y" }}</div>
@@ -84,6 +83,7 @@
     <div class="label">Collected <i data-lucide="banknote"></i></div>
     <div class="value positive">{{ totals.collected|money }}</div>
     <div class="sub">{% include 'dashboard/_delta.html' with delta=deltas.collected %} vs {{ prev_totals.collected|money }}</div>
+    <div class="sub">Less {{ fee_percent }}%: {{ totals.fee|money }} · <strong>Net {{ totals.net|money }}</strong></div>
   </div>
   <div class="panel stat">
     <div class="label">Requests <i data-lucide="receipt"></i></div>
@@ -122,7 +122,7 @@
         <thead>
           <tr>
             <th>{{ unit|capfirst }}</th><th class="num">Requests</th><th class="num">Successful</th>
-            <th class="num">Failed</th><th class="num">Pending</th><th class="num">Rate</th><th class="num">Collected</th>
+            <th class="num">Failed</th><th class="num">Pending</th><th class="num">Rate (%)</th><th class="num">Collected</th><th class="num">Deduction ({{ fee_percent }}%)</th><th class="num">Net</th>
           </tr>
         </thead>
         <tbody>
@@ -137,8 +137,10 @@
               <td class="num">{{ r.successful }}</td>
               <td class="num">{{ r.failed }}</td>
               <td class="num">{{ r.pending }}</td>
-              <td class="num">{% if r.success_rate is not None %}{{ r.success_rate }}%{% else %}—{% endif %}</td>
+              <td class="num">{% if r.success_rate is not None %}{{ r.success_rate }}{% else %}—{% endif %}</td>
               <td class="num">{{ r.collected|money }}</td>
+              <td class="num">{{ r.fee|money }}</td>
+              <td class="num">{{ r.net|money }}</td>
             </tr>
           {% endfor %}
         </tbody>
@@ -149,8 +151,10 @@
             <td class="num">{{ totals.successful }}</td>
             <td class="num">{{ totals.failed }}</td>
             <td class="num">{{ totals.pending }}</td>
-            <td class="num">{% if totals.success_rate is not None %}{{ totals.success_rate }}%{% else %}—{% endif %}</td>
+            <td class="num">{% if totals.success_rate is not None %}{{ totals.success_rate }}{% else %}—{% endif %}</td>
             <td class="num">{{ totals.collected|money }}</td>
+              <td class="num">{{ totals.fee|money }}</td>
+              <td class="num">{{ totals.net|money }}</td>
           </tr>
         </tfoot>
       </table>
@@ -164,7 +168,7 @@
         <thead>
           <tr>
             <th>Application</th><th class="num">Requests</th><th class="num">Successful</th>
-            <th class="num">Failed</th><th class="num">Pending</th><th class="num">Rate</th><th class="num">Collected</th>
+            <th class="num">Failed</th><th class="num">Pending</th><th class="num">Rate (%)</th><th class="num">Collected</th><th class="num">Deduction ({{ fee_percent }}%)</th><th class="num">Net</th>
           </tr>
         </thead>
         <tbody>
@@ -175,11 +179,13 @@
               <td class="num">{{ r.successful }}</td>
               <td class="num">{{ r.failed }}</td>
               <td class="num">{{ r.pending }}</td>
-              <td class="num">{% if r.success_rate is not None %}{{ r.success_rate }}%{% else %}—{% endif %}</td>
+              <td class="num">{% if r.success_rate is not None %}{{ r.success_rate }}{% else %}—{% endif %}</td>
               <td class="num">{{ r.collected|money }}</td>
+              <td class="num">{{ r.fee|money }}</td>
+              <td class="num">{{ r.net|money }}</td>
             </tr>
           {% empty %}
-            <tr><td colspan="7"><div class="empty"><i data-lucide="inbox"></i>No transactions in this period.</div></td></tr>
+            <tr><td colspan="9"><div class="empty"><i data-lucide="inbox"></i>No transactions in this period.</div></td></tr>
           {% endfor %}
         </tbody>
       </table>
@@ -210,7 +216,7 @@
     const css = getComputedStyle(document.documentElement);
     const v = name => css.getPropertyValue(name).trim();
     Chart.defaults.font.family = 'Inter, system-ui, sans-serif';
-    const chart = new Chart(document.getElementById('reportChart'), {
+    new Chart(document.getElementById('reportChart'), {
       data: {
         labels: data.map(d => d.label),
         datasets: [
@@ -238,10 +244,6 @@
         },
       },
     });
-
-    // Redraw at page width when printing so the chart isn't clipped
-    window.addEventListener('beforeprint', () => chart.resize(680, 260));
-    window.addEventListener('afterprint', () => chart.resize());
   })();
 </script>
 {% endblock %}

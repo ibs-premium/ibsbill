@@ -1,13 +1,35 @@
+{% load dashboard_extras %}
 {% if page.paginator.count %}
+{% with qs=querystring|default:"" %}{% with base="?"|add:qs %}
 <div class="pager">
   <span>Showing {{ page.start_index }}–{{ page.end_index }} of {{ page.paginator.count }}</span>
-  <span class="d-flex gap-2">
+  {% if page.paginator.num_pages > 1 %}
+  <nav class="pager-nav" aria-label="Pagination">
     {% if page.has_previous %}
-      <a class="btn btn-ghost btn-sm" href="?{% if querystring %}{{ querystring }}&{% endif %}page={{ page.previous_page_number }}"><i data-lucide="chevron-left"></i> Prev</a>
+      <a class="pager-btn" href="{{ base }}{% if querystring %}&{% endif %}page=1" title="First page" aria-label="First page"><i data-lucide="chevrons-left"></i></a>
+      <a class="pager-btn" href="{{ base }}{% if querystring %}&{% endif %}page={{ page.previous_page_number }}" title="Previous page" aria-label="Previous page"><i data-lucide="chevron-left"></i></a>
+    {% else %}
+      <span class="pager-btn disabled" aria-hidden="true"><i data-lucide="chevrons-left"></i></span>
+      <span class="pager-btn disabled" aria-hidden="true"><i data-lucide="chevron-left"></i></span>
     {% endif %}
+
+    {% for n in page|page_window %}
+      {% if n == page.number %}
+        <span class="pager-btn active" aria-current="page">{{ n }}</span>
+      {% else %}
+        <a class="pager-btn" href="{{ base }}{% if querystring %}&{% endif %}page={{ n }}">{{ n }}</a>
+      {% endif %}
+    {% endfor %}
+
     {% if page.has_next %}
-      <a class="btn btn-ghost btn-sm" href="?{% if querystring %}{{ querystring }}&{% endif %}page={{ page.next_page_number }}">Next <i data-lucide="chevron-right"></i></a>
+      <a class="pager-btn" href="{{ base }}{% if querystring %}&{% endif %}page={{ page.next_page_number }}" title="Next page" aria-label="Next page"><i data-lucide="chevron-right"></i></a>
+      <a class="pager-btn" href="{{ base }}{% if querystring %}&{% endif %}page={{ page.paginator.num_pages }}" title="Last page" aria-label="Last page"><i data-lucide="chevrons-right"></i></a>
+    {% else %}
+      <span class="pager-btn disabled" aria-hidden="true"><i data-lucide="chevron-right"></i></span>
+      <span class="pager-btn disabled" aria-hidden="true"><i data-lucide="chevrons-right"></i></span>
     {% endif %}
-  </span>
+  </nav>
+  {% endif %}
 </div>
+{% endwith %}{% endwith %}
 {% endif %}

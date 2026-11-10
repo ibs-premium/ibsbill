@@ -373,6 +373,27 @@ pre.code {
   color: var(--neutral-500);
 }
 
+.pager-nav { display: flex; align-items: center; gap: 6px; }
+.pager-btn {
+  min-width: 34px;
+  height: 34px;
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--neutral-200);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--neutral-800);
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: none;
+}
+.pager-btn svg { width: 16px; height: 16px; }
+a.pager-btn:hover { background: var(--neutral-50); border-color: var(--neutral-300); color: var(--neutral-900); }
+.pager-btn.active { background: var(--brand-700); border-color: var(--brand-700); color: #fff; font-weight: 600; }
+.pager-btn.disabled { opacity: .4; cursor: not-allowed; }
+
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 

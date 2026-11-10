@@ -2,9 +2,11 @@
 import calendar
 import csv
 from datetime import date, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 from urllib.parse import urlencode
 
 from django.contrib import messages
+from decouple import config
 from django.contrib.auth.decorators import user_passes_test
 from django.core.paginator import Paginator
 from django.db.models import Count, Q, Sum
@@ -17,8 +19,12 @@ from django.views.decorators.http import require_POST
 from .forms import ApplicationForm
 from .models import Application, CallBacks, EBill
 from .payments import apply_final_status, check_with_mtn, get_mtn_token
+from .report_pdf import build_report_pdf
 
 STATUSES = ['SUCCESSFUL', 'PENDING', 'FAILED']
+
+# Deduction taken from collected (successful) payments, shown in the reports.
+FEE_PERCENT = Decimal(config('COLLECTION_FEE_PERCENT', default='1'))
 
 staff_required = user_passes_test(
     lambda u: u.is_active and u.is_staff, login_url='dashboard:login'
@@ -67,10 +73,23 @@ def _with_rate(row):
     return row
 
 
+def _fee(collected):
+    """The deduction on an amount, rounded to 2 decimal places (half up)."""
+    amount = Decimal(str(round(collected or 0, 2)))
+    return float((amount * FEE_PERCENT / 100).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+
+
+def _with_fee(row):
+    """Add fee (the deduction) and net (collected minus fee) to a row that has `collected`."""
+    row['fee'] = _fee(row['collected'])
+    row['net'] = round(row['collected'] - row['fee'], 2)
+    return row
+
+
 @staff_required
 def overview(request):
     bills = EBill.objects.all()
-    totals = _with_rate(bills.aggregate(**TOTALS))
+    totals = _with_fee(_with_rate(bills.aggregate(**TOTALS)))
 
     # Daily volume for the last 14 days, with empty days filled in
     today = timezone.localdate()
@@ -108,6 +127,7 @@ def overview(request):
     return render(request, 'dashboard/overview.html', {
         'nav': 'overview',
         'totals': totals,
+        'fee_percent': f'{FEE_PERCENT.normalize():f}',
         'chart': chart,
         'by_app': by_app,
         'recent': bills.order_by('-request_datetime')[:8],
@@ -141,7 +161,7 @@ def transactions(request):
                              b.request_completed_datetime.isoformat() if b.request_completed_datetime else ''])
         return response
 
-    page = Paginator(bills, 25).get_page(request.GET.get('page'))
+    page = Paginator(bills, 50).get_page(request.GET.get('page'))
     params = request.GET.copy()
     params.pop('page', None)
 
@@ -288,7 +308,7 @@ def callbacks(request):
     q = request.GET.get('q', '').strip()
     if q:
         logs = logs.filter(Q(contents__icontains=q) | Q(ip_address__icontains=q))
-    page = Paginator(logs, 25).get_page(request.GET.get('page'))
+    page = Paginator(logs, 50).get_page(request.GET.get('page'))
     return render(request, 'dashboard/callbacks.html', {
         'nav': 'callbacks',
         'page': page,
@@ -412,8 +432,8 @@ def reports(request):
     if app:
         bills, prev = bills.filter(app=app), prev.filter(app=app)
 
-    totals = _with_rate(bills.aggregate(**TOTALS))
-    prev_totals = _with_rate(prev.aggregate(**TOTALS))
+    totals = _with_fee(_with_rate(bills.aggregate(**TOTALS)))
+    prev_totals = _with_fee(_with_rate(prev.aggregate(**TOTALS)))
     totals['average'] = totals['collected'] / totals['successful'] if totals['successful'] else 0
     deltas = {
         'collected': _delta(totals['collected'], prev_totals['collected']),
@@ -435,9 +455,12 @@ def reports(request):
         row = _with_rate(dict(row) if row else {'count': 0, 'successful': 0, 'failed': 0, 'pending': 0})
         row['date'] = bucket
         row['label'] = bucket.strftime('%a %d %b' if unit == 'day' else '%B %Y')
-        rows.append(row)
+        rows.append(_with_fee(row))
+    # The total is the sum of the rows so the columns add up exactly
+    totals['fee'] = round(sum(r['fee'] for r in rows), 2)
+    totals['net'] = round(totals['collected'] - totals['fee'], 2)
 
-    by_app = [_with_rate(r) for r in bills.values('app').annotate(**TOTALS).order_by('-collected', '-count')]
+    by_app = [_with_fee(_with_rate(r)) for r in bills.values('app').annotate(**TOTALS).order_by('-collected', '-count')]
 
     if request.GET.get('export') == 'csv':
         response = HttpResponse(content_type='text/csv')
@@ -448,13 +471,13 @@ def reports(request):
         writer.writerow(['Application', app or 'All'])
         writer.writerow([])
         writer.writerow(['Day' if unit == 'day' else 'Month', 'Requests', 'Successful', 'Failed', 'Pending',
-                         'Success rate %', 'Collected'])
+                         'Success rate %', 'Collected', f'Deduction ({FEE_PERCENT.normalize():f}%)', 'Net'])
         for r in rows + [dict(totals, date=None)]:
             when = 'Total' if r['date'] is None else (
                 r['date'].isoformat() if unit == 'day' else r['date'].strftime('%Y-%m'))
             rate = r['success_rate'] if r['success_rate'] is not None else ''
             writer.writerow([when, r['count'], r['successful'], r['failed'], r['pending'],
-                             rate, f"{r['collected']:.2f}"])
+                             rate, f"{r['collected']:.2f}", f"{r['fee']:.2f}", f"{r['net']:.2f}"])
         return response
 
     first = EBill.objects.order_by('request_datetime').values_list('request_datetime', flat=True).first()
@@ -462,7 +485,7 @@ def reports(request):
     params = request.GET.copy()
     params.pop('export', None)
 
-    return render(request, 'dashboard/reports.html', {
+    context = {
         'nav': 'reports',
         'periods': PERIODS,
         'period': period,
@@ -483,6 +506,15 @@ def reports(request):
         'rows': rows,
         'chart': [{'label': r['label'], 'count': r['count'], 'amount': r['collected']} for r in rows],
         'by_app': by_app,
+        'fee_percent': f'{FEE_PERCENT.normalize():f}',
         'querystring': params.urlencode(),
         'generated': timezone.localtime(),
-    })
+    }
+
+    if request.GET.get('export') == 'pdf':
+        response = HttpResponse(build_report_pdf(dict(context, username=request.user.get_username())),
+                                content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="momo_report_{start}_{end}.pdf"'
+        return response
+
+    return render(request, 'dashboard/reports.html', context)
