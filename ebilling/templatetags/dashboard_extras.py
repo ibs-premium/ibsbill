@@ -3,6 +3,8 @@ import json
 from django import template
 from decouple import config
 
+from ..payments import failure_text as _failure_text
+
 register = template.Library()
 
 CURRENCY = config('MTN_CURRENCY', default='')
@@ -37,6 +39,29 @@ def page_window(page, size=3):
     size = min(int(size), total)
     start = max(1, min(page.number - size // 2, total - size + 1))
     return range(start, start + size)
+
+
+@register.filter
+def outcome_class(outcome):
+    """Badge colour for a callback outcome."""
+    return {
+        'processed': 'success', 'already_processed': 'unknown', 'pending': 'unknown',
+        'unconfirmed': 'pending', 'unverified': 'pending',
+        'mismatch': 'failed', 'unknown_reference': 'failed', 'invalid': 'failed',
+    }.get(outcome, 'unknown')
+
+
+@register.filter
+def outcome_help(outcome):
+    """One-sentence explanation of a callback outcome."""
+    from ..models import CallBacks
+    return CallBacks.OUTCOME_HELP.get(outcome, 'Received before outcomes were recorded.')
+
+
+@register.filter
+def failure_text(code):
+    """Plain-words explanation of a stored MTN failure reason code."""
+    return _failure_text(code)
 
 
 @register.filter

@@ -6,6 +6,35 @@
 {% block heading %}Callback #{{ log.pk }}{% endblock %}
 
 {% block content %}
+{% if log.outcome %}
+<div class="alert-d {% if log.outcome in 'mismatch,unknown_reference,invalid' %}error{% elif log.outcome in 'unconfirmed,unverified' %}warn{% else %}info{% endif %}">
+  <span><strong>{{ log.get_outcome_display }}.</strong> {{ log.outcome|outcome_help }}</span>
+</div>
+{% endif %}
+
+<section class="panel mb-3">
+  <div class="panel-head">
+    <h2>Payment</h2>
+    {% if log.ebill and not log.ebill.transaction_complete %}
+      <form method="post" action="{% url 'dashboard:transaction_check' log.ebill.pk %}">
+        {% csrf_token %}
+        <button class="btn btn-ghost btn-sm" type="submit"><i data-lucide="refresh-cw"></i> Check status with MTN</button>
+      </form>
+    {% endif %}
+  </div>
+  <dl class="kv">
+    {% if log.ebill %}
+      <dt>Payment</dt><dd><a class="link-brand mono" href="{% url 'dashboard:transaction_detail' log.ebill.pk %}">{{ log.ebill.uuid }}</a></dd>
+      <dt>Amount</dt><dd>{{ log.ebill.amount|money }}</dd>
+      <dt>Status now</dt><dd>{% include 'dashboard/_status.html' with status=log.ebill.status reason=log.ebill.failure_reason %}</dd>
+    {% else %}
+      <dt>Payment</dt><dd>{% if log.reference %}No payment matches <span class="mono">{{ log.reference }}</span>{% else %}No reference could be read from this callback{% endif %}</dd>
+    {% endif %}
+    <dt>Callback said</dt><dd class="mono">{{ log.claimed_status|default:"—" }}</dd>
+    <dt>MTN said when checked</dt><dd class="mono">{{ log.verified_status|default:"—" }}</dd>
+  </dl>
+</section>
+
 <section class="panel mb-3">
   <dl class="kv">
     <dt>Received</dt><dd>{{ log.date|date:"d M Y, H:i:s" }}</dd>

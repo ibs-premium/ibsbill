@@ -5,7 +5,7 @@
 {% block crumb %}{{ bill.uuid|truncatechars:13 }}{% endblock %}
 {% block heading %}{{ bill.amount|money }}{% endblock %}
 {% block actions %}
-  {% include 'dashboard/_status.html' with status=bill.status %}
+  {% include 'dashboard/_status.html' with status=bill.status reason=bill.failure_reason %}
   {% if not bill.transaction_complete %}
     <form method="post" action="{% url 'dashboard:transaction_check' bill.pk %}">
       {% csrf_token %}
@@ -26,6 +26,7 @@
       <dt>Application</dt><dd>{{ bill.app }}</dd>
       <dt>Username</dt><dd>{{ bill.username|default:"—" }}</dd>
       <dt>Device ID</dt><dd class="mono">{{ bill.device_id }}</dd>
+      {% if bill.status == 'FAILED' %}<dt>Reason for failure</dt><dd>{{ bill.failure_reason|failure_text|default:"Not reported by MTN" }}{% if bill.failure_reason %} <span class="muted mono">({{ bill.failure_reason }})</span>{% endif %}</dd>{% endif %}
       <dt>MoMo transaction ID</dt><dd class="mono">{{ bill.financial_transaction_id|default:"—" }}</dd>
       <dt>Balance before / after</dt><dd>{{ bill.balance_before|money }} → {% if bill.balance_after is not None %}{{ bill.balance_after|money }}{% else %}—{% endif %}</dd>
       <dt>Initial MoMo response</dt><dd>{{ bill.momo_api_initial_status_code|default:"—" }} · {{ bill.momo_api_initial_message|default:"—" }}</dd>
@@ -52,6 +53,7 @@
         <li>
           <span class="dot {% if bill.status == 'SUCCESSFUL' %}on{% elif bill.status == 'FAILED' %}bad{% endif %}"></span>
           <div class="title">Payment {{ bill.status|lower }}</div>
+          {% if bill.status == 'FAILED' and bill.failure_reason %}<div class="when">{{ bill.failure_reason|failure_text }}</div>{% endif %}
           <div class="when">{{ bill.request_completed_datetime|date:"d M Y, H:i:s"|default:"Awaiting final status" }}</div>
         </li>
         <li>
@@ -68,4 +70,29 @@
     </div>
   </section>
 </div>
+
+<section class="panel mt-3">
+  <div class="panel-head">
+    <h2>Callbacks from MTN</h2>
+    <span class="muted small">{{ callbacks|length }} received</span>
+  </div>
+  {% if callbacks %}
+    <div class="table-wrap">
+      <table class="table-d">
+        <thead><tr><th>Received</th><th>Callback said</th><th>Outcome</th></tr></thead>
+        <tbody>
+          {% for cb in callbacks %}
+            <tr class="clickable" onclick="location.href='{% url 'dashboard:callback_detail' cb.pk %}'">
+              <td class="muted text-nowrap">{{ cb.date|date:"d M Y, H:i:s" }}</td>
+              <td class="mono">{{ cb.claimed_status|default:"—" }}</td>
+              <td>{% if cb.outcome %}<span class="badge-s {{ cb.outcome|outcome_class }}" title="{{ cb.outcome|outcome_help }}">{{ cb.get_outcome_display }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="empty"><i data-lucide="radio"></i>MTN has not called back about this payment{% if not bill.transaction_complete %}. If it stays pending, use <strong>Check status with MTN</strong>{% endif %}.</div>
+  {% endif %}
+</section>
 {% endblock %}

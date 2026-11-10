@@ -1,0 +1,29 @@
+{% load dashboard_extras %}
+{% if health.stale_pending %}
+  <div class="alert-d warn">
+    <i data-lucide="triangle-alert"></i>
+    <span><strong>{{ health.stale_pending }} payment{{ health.stale_pending|pluralize }}</strong> from the last 3 days
+    {{ health.stale_pending|pluralize:"has,have" }} been pending for over 30 minutes with no callback from MTN.
+    MTN calls back for every request it accepts, so check that the callback address is reachable, or
+    <a class="link-brand" href="{% url 'dashboard:transactions' %}?status=PENDING">check them with MTN</a>.</span>
+  </div>
+{% endif %}
+<section class="panel mb-3">
+  <div class="health">
+    <div>
+      <div class="muted small">Last callback received</div>
+      <div class="fw-semibold">{% if health.last %}{{ health.last|timesince }} ago{% else %}Never{% endif %}</div>
+      {% if health.last %}<div class="muted small">{{ health.last|date:"d M Y, H:i" }}</div>{% endif %}
+    </div>
+    <div>
+      <div class="muted small">Callbacks in the last 24 hours</div>
+      <div class="fw-semibold">{{ health.last_day }}</div>
+    </div>
+    <div>
+      <div class="muted small">Need attention (last 7 days)</div>
+      <div class="fw-semibold {% if health.attention %}text-danger{% endif %}">
+        {% if health.attention %}<a class="link-brand" href="{% url 'dashboard:callbacks' %}?outcome=attention">{{ health.attention }}</a>{% else %}0{% endif %}
+      </div>
+    </div>
+  </div>
+</section>

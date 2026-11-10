@@ -1,61 +1,4 @@
-from datetime import datetime, timedelta, date
 from django.db import models
-from django.utils import timezone
-import pytz
-import os
-
-from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
-
-
-class UserManager(BaseUserManager):
-    def create_user(self, email, surname, firstname, password=None, **extra_fields):
-        if not email:
-            raise ValueError("The Email field is required.")
-        if not surname:
-            raise ValueError("The Surname field is required.")
-        if not firstname:
-            raise ValueError("The Firstname field is required.")
-
-        email = self.normalize_email(email)
-        user = self.model(email=email, surname=surname, firstname=firstname, **extra_fields)
-        user.set_password(password)
-        user.save(using=self._db)
-        return user
-
-    def create_superuser(self, email, surname, firstname, password=None):
-        extra_fields = {'is_admin': True, 'is_superuser': True, 'is_staff': True}
-        return self.create_user(email, surname, firstname, password, **extra_fields)
-
-
-class User(AbstractBaseUser, PermissionsMixin):
-    email = models.EmailField(unique=True, max_length=255)
-    surname = models.CharField(max_length=255)
-    firstname = models.CharField(max_length=255)
-    username = models.CharField(max_length=255, default="admin")
-    phone = models.CharField(max_length=15, blank=True, null=True)
-    is_active = models.BooleanField(default=True)
-    is_staff = models.BooleanField(default=False)
-    is_admin = models.BooleanField(default=False)
-    groups = models.ManyToManyField('auth.Group', related_name='user_set_custom', blank=True)
-    user_permissions = models.ManyToManyField('auth.Permission', related_name='user_permissions_custom', blank=True)
-    USERNAME_FIELD = 'email'
-    REQUIRED_FIELDS = ['surname', 'firstname']
-    objects = UserManager()
-
-    def __str__(self):
-        return f"{self.firstname} {self.surname} ({self.email})"
-
-    def get_full_name(self):
-        return f"{self.firstname} {self.surname}"
-
-    def get_short_name(self):
-        return self.firstname
-
-    def has_perm(self, perm, obj=None):
-        return True
-
-    def has_module_perms(self, app_label):
-        return True
 
 
 class Application(models.Model):
@@ -70,18 +13,16 @@ class Application(models.Model):
 
 class EBill(models.Model):
     app = models.CharField(max_length=30)
-    app_key = models.CharField(max_length=30)
     app_ip = models.CharField(max_length=50)
     app_url = models.CharField(max_length=500)
-    amount = models.FloatField()
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
     username = models.CharField(max_length=50)
-    token = models.TextField()
     uuid = models.CharField(max_length=255, unique=True)
     device_id = models.CharField(max_length=255, verbose_name='Device Id, e.g. Meter serial number')
     momo_number = models.CharField(max_length=15, blank=True, default='', verbose_name='Payer MoMo number')
     momo_name = models.CharField(max_length=255, blank=True, default='', verbose_name='Payer MoMo name')
-    balance_before = models.FloatField(null=False, default=0)
-    balance_after = models.FloatField(null=True, blank=True)
+    balance_before = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    balance_after = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
 
     # MTN MoMo request state
     request_sent = models.BooleanField(default=False)
@@ -89,9 +30,10 @@ class EBill(models.Model):
     momo_api_initial_message = models.TextField(null=True, blank=True)
     financial_transaction_id = models.CharField(max_length=255, null=True, blank=True, default='')
     status = models.CharField(max_length=50, null=True, blank=True, default='PENDING')
+    failure_reason = models.CharField(max_length=100, blank=True, default='',
+                                      help_text='Why the payment failed, as reported by MTN (e.g. EXPIRED)')
 
     # Completion tracking
-    request_sent = models.BooleanField(default=False)
     transaction_complete = models.BooleanField(default=False)
     request_datetime = models.DateTimeField(auto_now_add=True)
     request_completed_datetime = models.DateTimeField(null=True, blank=True)
@@ -107,6 +49,43 @@ class EBill(models.Model):
 
 
 class CallBacks(models.Model):
+    # What the gateway did with a callback (set once it has been looked at)
+    OUTCOME_CHOICES = [
+        ('processed', 'Recorded'),
+        ('already_processed', 'Already recorded'),
+        ('pending', 'Still pending'),
+        ('unconfirmed', 'Not confirmed by MTN'),
+        ('mismatch', 'Disagrees with MTN'),
+        ('unknown_reference', 'Unknown reference'),
+        ('unverified', 'Could not check with MTN'),
+        ('invalid', 'Not valid JSON'),
+    ]
+    OUTCOME_HELP = {
+        'processed': 'MTN confirmed the result and it was recorded on the payment.',
+        'already_processed': 'The payment already had its final result, so nothing changed.',
+        'pending': 'MTN says the payment is still waiting for the customer.',
+        'unconfirmed': 'The callback claimed a final result but MTN did not confirm it. Usually MTN\'s status '
+                       'had not caught up yet and the next check settles it; it could also be a forged callback.',
+        'mismatch': 'The callback claimed one final result and MTN reports a different one. The result from '
+                    'MTN was recorded. Look into this one.',
+        'unknown_reference': 'The callback names a payment we have no record of. MTN only calls back about '
+                             'payments we sent, so this is unexpected.',
+        'unverified': 'The gateway could not reach MTN to confirm the result, so nothing was recorded. '
+                      'Check the payment with MTN.',
+        'invalid': 'The body was not valid JSON, so it could not be matched to a payment.',
+    }
+    # Outcomes worth a person looking at
+    ATTENTION_OUTCOMES = ('mismatch', 'unconfirmed', 'unknown_reference', 'unverified', 'invalid')
+
+    ebill = models.ForeignKey('EBill', null=True, blank=True, on_delete=models.SET_NULL, related_name='callbacks',
+                              verbose_name='Payment')
+    reference = models.CharField(max_length=255, blank=True, default='', db_index=True,
+                                 verbose_name='Reference named in the callback')
+    claimed_status = models.CharField(max_length=50, blank=True, default='',
+                                      help_text='The status the callback said, which is not trusted')
+    verified_status = models.CharField(max_length=50, blank=True, default='',
+                                       help_text='The status MTN reported when the gateway checked')
+    outcome = models.CharField(max_length=30, blank=True, default='', choices=OUTCOME_CHOICES, db_index=True)
     url = models.CharField(max_length=255, verbose_name='URL of app')
     method = models.CharField(max_length=10, verbose_name='HTTP Method')
     headers = models.TextField(blank=True, null=True, verbose_name='Request Headers')

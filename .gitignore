@@ -196,3 +196,6 @@ desktop.ini
 
 # Database (never commit; production data lives on the server)
 db.sqlite3
+
+# Django file cache (MTN token, rate limits)
+cache/

@@ -7,7 +7,7 @@ from unittest import mock
 from django.contrib.auth.models import User
 from django.core.cache import cache
 from django.core.management import call_command
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from .models import Application, CallBacks, EBill
@@ -23,29 +23,43 @@ def mtn_status_response(status, code=200, financial_id='FIN-1', payer=None):
     return {'success': True, 'status_code': 200, 'raw_response_text': json.dumps(body)}
 
 
+@override_settings(CACHES={'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}})
 class PaymentTestCase(TestCase):
     def setUp(self):
         cache.clear()  # don't let a cached MTN token leak between tests
 
     def make_bill(self, **kwargs):
-        fields = dict(app='ebilling', app_key='k', app_ip='127.0.0.1', app_url='http://x', amount=20,
-                      username='u', token='t', uuid=str(uuid.uuid4()), device_id='MTR-1', status='PENDING')
+        fields = dict(app='ebilling', app_ip='127.0.0.1', app_url='http://x', amount=20,
+                      username='u', uuid=str(uuid.uuid4()), device_id='MTR-1', status='PENDING')
         fields.update(kwargs)
         return EBill.objects.create(**fields)
 
 
-class BillTests(PaymentTestCase):
-    @mock.patch('ebilling.this.get_account_holder_name', return_value='KOFI MENSAH')
-    @mock.patch('ebilling.this.request_to_pay')
-    @mock.patch('ebilling.this.get_token', return_value='tok')
-    def test_reference_is_sent_as_external_id(self, _token, request_to_pay, lookup):
-        Application.objects.create(name='ebilling', url='http://x', key='k', ip_address='127.0.0.1')
-        request_to_pay.side_effect = lambda token, amount, number, ref_id, external_id: {
-            'success': True, 'status_code': 202, 'reference_id': ref_id, 'message': 'ok'}
+def post_json(client, url, body, **extra):
+    return client.post(url, json.dumps(body), content_type='application/json', **extra)
 
-        r = self.client.post('/bill/', json.dumps({
-            'app': 'ebilling', 'app_key': 'k', 'amount': 10, 'momo_number': '0241234567', 'device_id': 'MTR-9',
-        }), content_type='application/json')
+
+@mock.patch('ebilling.mtn.get_account_holder_name', return_value='KOFI MENSAH')
+@mock.patch('ebilling.mtn.get_token', return_value='tok')
+class BillTests(PaymentTestCase):
+    def setUp(self):
+        super().setUp()
+        self.app = Application.objects.create(name='ebilling', url='http://x', key='secretkey',
+                                              ip_address='127.0.0.1')
+
+    def payload(self, **kw):
+        body = {'app': 'ebilling', 'app_key': 'secretkey', 'amount': 10, 'momo_number': '0241234567',
+                'device_id': 'MTR-9'}
+        body.update(kw)
+        return body
+
+    def accepted(self, token, amount, number, ref_id, external_id):
+        return {'success': True, 'status_code': 202, 'reference_id': ref_id, 'message': 'ok'}
+
+    @mock.patch('ebilling.mtn.request_to_pay')
+    def test_reference_is_sent_as_external_id(self, request_to_pay, _token, lookup):
+        request_to_pay.side_effect = self.accepted
+        r = post_json(self.client, '/bill/', self.payload())
 
         self.assertEqual(r.status_code, 200)
         args, kwargs = request_to_pay.call_args
@@ -53,100 +67,247 @@ class BillTests(PaymentTestCase):
         self.assertEqual(kwargs['external_id'], ref_id)
         bill = EBill.objects.get()
         self.assertEqual(bill.uuid, ref_id)
+        self.assertTrue(bill.request_sent)
 
         # payer details: number normalised to 233…, name looked up from MTN
         lookup.assert_called_once_with('tok', '233241234567')
         self.assertEqual((bill.momo_number, bill.momo_name), ('233241234567', 'KOFI MENSAH'))
         self.assertEqual(r.json()['payer'], {'momo_number': '233241234567', 'momo_name': 'KOFI MENSAH'})
 
+    @mock.patch('ebilling.mtn.request_to_pay')
+    def test_mtn_token_is_never_returned_or_stored(self, request_to_pay, _token, _lookup):
+        request_to_pay.side_effect = self.accepted
+        r = post_json(self.client, '/bill/', self.payload())
+        self.assertNotIn('tok"', r.content.decode())
+        self.assertNotIn('token', r.json()['momo_request'])
+        field_names = {f.name for f in EBill._meta.get_fields()}
+        self.assertFalse({'token', 'app_key'} & field_names)
 
+    @mock.patch('ebilling.mtn.request_to_pay')
+    def test_wrong_or_missing_key_is_rejected(self, request_to_pay, _token, _lookup):
+        for body in (self.payload(app_key='nope'), self.payload(app_key=None), self.payload(app='unknown')):
+            r = post_json(self.client, '/bill/', body)
+            self.assertEqual(r.status_code, 403)
+        request_to_pay.assert_not_called()
+        self.assertFalse(EBill.objects.exists())
+
+    @mock.patch('ebilling.mtn.request_to_pay')
+    def test_caller_must_come_from_registered_ip(self, request_to_pay, _token, _lookup):
+        request_to_pay.side_effect = self.accepted
+        r = post_json(self.client, '/bill/', self.payload(), REMOTE_ADDR='203.0.113.9')
+        self.assertEqual(r.status_code, 403)
+        request_to_pay.assert_not_called()
+
+        # a forged X-Forwarded-For entry written by the caller is not trusted
+        r = post_json(self.client, '/bill/', self.payload(), REMOTE_ADDR='203.0.113.9',
+                      HTTP_X_FORWARDED_FOR='127.0.0.1, 203.0.113.9')
+        self.assertEqual(r.status_code, 403)
+
+        # the entry added by our own proxy is
+        r = post_json(self.client, '/bill/', self.payload(), REMOTE_ADDR='10.0.0.1',
+                      HTTP_X_FORWARDED_FOR='198.51.100.7, 127.0.0.1')
+        self.assertEqual(r.status_code, 200)
+
+    @mock.patch('ebilling.mtn.request_to_pay')
+    def test_amount_is_validated_and_rounded(self, request_to_pay, _token, _lookup):
+        request_to_pay.side_effect = self.accepted
+        for bad in (0, -5, 'abc', 'nan', 'inf', None, 10 ** 9):
+            self.assertEqual(post_json(self.client, '/bill/', self.payload(amount=bad)).status_code, 400, bad)
+        self.assertEqual(post_json(self.client, '/bill/', self.payload(amount=12.345)).status_code, 200)
+        self.assertEqual(str(EBill.objects.get().amount), '12.35')
+
+    @mock.patch('ebilling.mtn.request_to_pay')
+    def test_payment_is_saved_before_mtn_is_called(self, request_to_pay, _token, _lookup):
+        seen = {}
+
+        def fake(token, amount, number, ref_id, external_id):
+            seen['saved'] = EBill.objects.filter(uuid=ref_id).exists()
+            return self.accepted(token, amount, number, ref_id, external_id)
+
+        request_to_pay.side_effect = fake
+        post_json(self.client, '/bill/', self.payload())
+        self.assertTrue(seen['saved'])
+
+    @mock.patch('ebilling.mtn.request_to_pay')
+    def test_refused_request_is_closed_as_failed(self, request_to_pay, _token, _lookup):
+        request_to_pay.return_value = {'success': False, 'status_code': 400, 'message': 'bad'}
+        r = post_json(self.client, '/bill/', self.payload())
+        self.assertFalse(r.json()['ok'])
+        bill = EBill.objects.get()
+        self.assertEqual((bill.status, bill.transaction_complete, bill.request_sent), ('FAILED', True, False))
+
+    @mock.patch('ebilling.mtn.request_to_pay')
+    def test_uncertain_failure_stays_pending(self, request_to_pay, _token, _lookup):
+        request_to_pay.return_value = {'success': False, 'status_code': None, 'message': 'timeout'}
+        post_json(self.client, '/bill/', self.payload())
+        bill = EBill.objects.get()
+        self.assertEqual((bill.status, bill.transaction_complete), ('PENDING', False))
+
+    @mock.patch('ebilling.mtn.request_to_pay')
+    def test_rejected_cached_token_is_replaced_once(self, request_to_pay, _token, _lookup):
+        request_to_pay.side_effect = [{'success': False, 'status_code': 401, 'message': 'expired'},
+                                      {'success': True, 'status_code': 202, 'message': 'ok'}]
+        r = post_json(self.client, '/bill/', self.payload())
+        self.assertTrue(r.json()['ok'])
+        self.assertEqual(request_to_pay.call_count, 2)
+
+
+@mock.patch('ebilling.mtn.get_token', return_value='tok')
 class CallbackTests(PaymentTestCase):
+    """The callback body is only used to find the payment; MTN confirms the result."""
+
     def callback(self, body, method='put', **headers):
         send = getattr(self.client, method)
         return send('/bill/mtn-callback/', json.dumps(body), content_type='application/json', headers=headers)
 
-    def test_put_callback_marks_success(self):
+    def test_callback_is_confirmed_with_mtn(self, _token):
         bill = self.make_bill()
-        r = self.callback({'externalId': bill.uuid, 'status': 'SUCCESSFUL', 'financialTransactionId': '123'})
+        with mock.patch('ebilling.mtn.check_status',
+                        return_value=mtn_status_response('SUCCESSFUL', financial_id='123')) as check:
+            r = self.callback({'externalId': bill.uuid, 'status': 'SUCCESSFUL', 'financialTransactionId': 'fake'})
         self.assertEqual(r.status_code, 200)
+        check.assert_called_once()
         bill.refresh_from_db()
         self.assertEqual(bill.status, 'SUCCESSFUL')
         self.assertTrue(bill.transaction_complete)
-        self.assertEqual(bill.financial_transaction_id, '123')
+        self.assertEqual(bill.financial_transaction_id, '123')  # MTN's value, not the callback's
         self.assertIsNotNone(bill.request_completed_datetime)
         self.assertEqual(CallBacks.objects.get().method, 'PUT')
 
-    def test_post_still_accepted_and_get_rejected(self):
+    def test_forged_callback_cannot_mark_a_payment_paid(self, _token):
         bill = self.make_bill()
-        self.assertEqual(self.callback({'externalId': bill.uuid, 'status': 'FAILED'}, method='post').status_code, 200)
+        with mock.patch('ebilling.mtn.check_status', return_value=mtn_status_response('PENDING')):
+            self.callback({'externalId': bill.uuid, 'status': 'SUCCESSFUL', 'financialTransactionId': 'fake'})
+        bill.refresh_from_db()
+        self.assertEqual((bill.status, bill.transaction_complete), ('PENDING', False))
+        self.assertEqual(bill.financial_transaction_id, '')
+
+    def test_post_still_accepted_and_get_rejected(self, _token):
+        bill = self.make_bill()
+        with mock.patch('ebilling.mtn.check_status', return_value=mtn_status_response('FAILED')):
+            r = self.callback({'externalId': bill.uuid, 'status': 'FAILED'}, method='post')
+        self.assertEqual(r.status_code, 200)
         self.assertEqual(self.client.get('/bill/mtn-callback/').status_code, 405)
 
-    def test_failure_is_recorded_as_complete(self):
+    def test_failure_is_recorded_as_complete(self, _token):
         bill = self.make_bill()
-        self.callback({'externalId': bill.uuid, 'status': 'FAILED'})
+        with mock.patch('ebilling.mtn.check_status', return_value=mtn_status_response('FAILED')):
+            self.callback({'externalId': bill.uuid, 'status': 'FAILED'})
         bill.refresh_from_db()
         self.assertEqual(bill.status, 'FAILED')
         self.assertTrue(bill.transaction_complete)
         self.assertIsNotNone(bill.request_completed_datetime)
 
-    def test_reference_in_header_is_matched(self):
+    def test_reference_in_header_is_matched(self, _token):
         bill = self.make_bill()
-        self.callback({'externalId': 'MTR-1', 'status': 'SUCCESSFUL'}, X_Reference_Id=bill.uuid)
+        with mock.patch('ebilling.mtn.check_status', return_value=mtn_status_response('SUCCESSFUL')):
+            self.callback({'externalId': 'MTR-1', 'status': 'SUCCESSFUL'}, X_Reference_Id=bill.uuid)
         bill.refresh_from_db()
         self.assertEqual(bill.status, 'SUCCESSFUL')
 
-    def test_pending_and_repeat_callbacks_change_nothing(self):
+    def test_repeat_callbacks_change_nothing(self, _token):
         bill = self.make_bill()
-        self.callback({'externalId': bill.uuid, 'status': 'PENDING'})
-        bill.refresh_from_db()
-        self.assertEqual(bill.status, 'PENDING')
-        self.assertFalse(bill.transaction_complete)
-
-        self.callback({'externalId': bill.uuid, 'status': 'SUCCESSFUL'})
-        r = self.callback({'externalId': bill.uuid, 'status': 'FAILED'})
+        with mock.patch('ebilling.mtn.check_status', return_value=mtn_status_response('SUCCESSFUL')) as check:
+            self.callback({'externalId': bill.uuid, 'status': 'SUCCESSFUL'})
+            r = self.callback({'externalId': bill.uuid, 'status': 'FAILED'})
         bill.refresh_from_db()
         self.assertEqual(bill.status, 'SUCCESSFUL')
         self.assertEqual(r.json()['message'], 'Already processed')
+        self.assertEqual(check.call_count, 1)
 
-    def test_callback_fills_in_missing_payer_number(self):
+    def test_payer_number_comes_from_mtn_not_the_callback(self, _token):
         bill = self.make_bill()
-        self.callback({'externalId': bill.uuid, 'status': 'SUCCESSFUL',
-                       'payer': {'partyIdType': 'MSISDN', 'partyId': '233241112222'}})
+        with mock.patch('ebilling.mtn.get_account_holder_name', return_value=''), \
+                mock.patch('ebilling.mtn.check_status',
+                           return_value=mtn_status_response('SUCCESSFUL', payer='233241112222')):
+            self.callback({'externalId': bill.uuid, 'status': 'SUCCESSFUL',
+                           'payer': {'partyIdType': 'MSISDN', 'partyId': '233000000000'}})
         bill.refresh_from_db()
         self.assertEqual(bill.momo_number, '233241112222')
 
-    def test_unknown_reference_is_acknowledged(self):
-        r = self.callback({'externalId': str(uuid.uuid4()), 'status': 'SUCCESSFUL'})
+    def test_unknown_reference_is_acknowledged_without_calling_mtn(self, _token):
+        with mock.patch('ebilling.mtn.check_status') as check:
+            r = self.callback({'externalId': str(uuid.uuid4()), 'status': 'SUCCESSFUL'})
         self.assertEqual(r.status_code, 200)
+        check.assert_not_called()
 
 
+@mock.patch('ebilling.mtn.get_token', return_value='tok')
 class BillStatusTests(PaymentTestCase):
-    @mock.patch('ebilling.this.check_status', return_value=mtn_status_response('FAILED'))
-    def test_polling_records_failure(self, _check):
+    def poll(self, ref, **extra):
+        return post_json(self.client, '/bill/callback/', dict({'reference_id': ref}, **extra))
+
+    @mock.patch('ebilling.mtn.check_status', return_value=mtn_status_response('FAILED'))
+    def test_polling_records_failure(self, check, _token):
         bill = self.make_bill()
-        r = self.client.post('/bill/callback/', json.dumps({'reference_id': bill.uuid, 'token': 't'}),
-                             content_type='application/json')
+        r = self.poll(bill.uuid)
         self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()['status'], 'FAILED')
+        self.assertEqual(check.call_args.args, (bill.uuid, 'tok'))  # our token, not one from the caller
         bill.refresh_from_db()
         self.assertEqual(bill.status, 'FAILED')
         self.assertTrue(bill.transaction_complete)
 
-    @mock.patch('ebilling.this.check_status')
-    def test_final_status_served_from_cache(self, check):
+    @mock.patch('ebilling.mtn.check_status')
+    def test_caller_supplied_token_is_ignored(self, check, _token):
+        check.return_value = mtn_status_response('PENDING')
+        bill = self.make_bill()
+        self.poll(bill.uuid, token='attacker-token')
+        self.assertEqual(check.call_args.args[1], 'tok')
+
+    @mock.patch('ebilling.mtn.check_status')
+    def test_final_status_served_from_cache(self, check, _token):
         bill = self.make_bill(status='SUCCESSFUL', transaction_complete=True)
-        r = self.client.post('/bill/callback/', json.dumps({'reference_id': bill.uuid, 'token': 't'}),
-                             content_type='application/json')
+        r = self.poll(bill.uuid)
         self.assertEqual(r.json()['source'], 'cache')
         check.assert_not_called()
 
+    @mock.patch('ebilling.mtn.check_status')
+    def test_unknown_reference_is_not_proxied_to_mtn(self, check, _token):
+        r = self.poll(str(uuid.uuid4()))
+        self.assertEqual(r.status_code, 404)
+        check.assert_not_called()
+        self.assertEqual(self.poll('').status_code, 400)
 
-@mock.patch('ebilling.this.get_token', return_value='tok')
+
+class DashboardPayTests(PaymentTestCase):
+    def setUp(self):
+        super().setUp()
+        Application.objects.create(name='ebilling', url='http://x', key='secretkey', ip_address='203.0.113.1')
+
+    def body(self, **kw):
+        return dict({'app': 'ebilling', 'amount': 5, 'momo_number': '0241234567', 'device_id': 'M1'}, **kw)
+
+    def test_requires_staff_login(self):
+        self.assertEqual(post_json(self.client, '/dashboard/pay/start/', self.body()).status_code, 302)
+        self.assertEqual(post_json(self.client, '/dashboard/pay/status/', {'reference_id': 'x'}).status_code, 302)
+
+    @mock.patch('ebilling.mtn.get_account_holder_name', return_value='')
+    @mock.patch('ebilling.mtn.request_to_pay', return_value={'success': True, 'status_code': 202, 'message': 'ok'})
+    @mock.patch('ebilling.mtn.get_token', return_value='tok')
+    def test_staff_can_start_and_poll_without_api_key_or_ip_match(self, _token, _pay, _lookup):
+        self.client.force_login(User.objects.create_user('staff', password='pw', is_staff=True))
+        r = post_json(self.client, '/dashboard/pay/start/', self.body())  # test client IP is 127.0.0.1
+        self.assertTrue(r.json()['ok'])
+        self.assertNotIn('token', r.json()['momo_request'])
+        bill = EBill.objects.get()
+        self.assertEqual(bill.username, 'staff')
+        with mock.patch('ebilling.mtn.check_status', return_value=mtn_status_response('SUCCESSFUL')):
+            r = post_json(self.client, '/dashboard/pay/status/', {'reference_id': bill.uuid})
+        self.assertEqual(r.json()['status'], 'SUCCESSFUL')
+
+    def test_pay_page_does_not_expose_app_keys(self):
+        self.client.force_login(User.objects.create_user('staff', password='pw', is_staff=True))
+        self.assertNotContains(self.client.get('/dashboard/pay/'), 'secretkey')
+
+
+@mock.patch('ebilling.mtn.get_token', return_value='tok')
 class DashboardCheckTests(PaymentTestCase):
     def setUp(self):
         super().setUp()
         self.client.force_login(User.objects.create_user('staff', password='pw', is_staff=True))
 
-    @mock.patch('ebilling.this.check_status', return_value=mtn_status_response('SUCCESSFUL'))
+    @mock.patch('ebilling.mtn.check_status', return_value=mtn_status_response('SUCCESSFUL'))
     def test_check_button_records_result(self, _check, _token):
         bill = self.make_bill()
         r = self.client.post(f'/dashboard/transactions/{bill.pk}/check/', follow=True)
@@ -154,7 +315,7 @@ class DashboardCheckTests(PaymentTestCase):
         bill.refresh_from_db()
         self.assertEqual(bill.status, 'SUCCESSFUL')
 
-    @mock.patch('ebilling.this.check_status', return_value=mtn_status_response(None, code=404))
+    @mock.patch('ebilling.mtn.check_status', return_value=mtn_status_response(None, code=404))
     def test_check_button_reports_not_found(self, _check, _token):
         bill = self.make_bill()
         r = self.client.post(f'/dashboard/transactions/{bill.pk}/check/', follow=True)
@@ -168,7 +329,7 @@ class DashboardCheckTests(PaymentTestCase):
 
 
 @mock.patch('ebilling.management.commands.recheck_pending.time.sleep')
-@mock.patch('ebilling.this.get_token', return_value='tok')
+@mock.patch('ebilling.mtn.get_token', return_value='tok')
 class RecheckPendingTests(PaymentTestCase):
     def setUp(self):
         super().setUp()
@@ -181,7 +342,7 @@ class RecheckPendingTests(PaymentTestCase):
 
     def run_command(self, *args):
         out = StringIO()
-        with mock.patch('ebilling.this.check_status', side_effect=self.fake_mtn) as check:
+        with mock.patch('ebilling.mtn.check_status', side_effect=self.fake_mtn) as check:
             call_command('recheck_pending', *args, stdout=out)
         return out.getvalue(), check
 
@@ -204,7 +365,7 @@ class RecheckPendingTests(PaymentTestCase):
         self.assertTrue(missing.transaction_complete)
 
 
-@mock.patch('ebilling.dashboard.CHECK_BATCH_SIZE', 2)
+@mock.patch('ebilling.dashboard.transactions.CHECK_BATCH_SIZE', 2)
 class BulkCheckTests(PaymentTestCase):
     def setUp(self):
         super().setUp()
@@ -227,11 +388,11 @@ class BulkCheckTests(PaymentTestCase):
             if data['done']:
                 return batches, totals
 
-    @mock.patch('ebilling.this.get_token', return_value='tok')
+    @mock.patch('ebilling.mtn.get_token', return_value='tok')
     def test_checks_only_filtered_unfinished_in_batches(self, _token):
         first = self.pending[0].uuid
         fake = lambda ref, tok: mtn_status_response('SUCCESSFUL' if ref == first else 'PENDING')
-        with mock.patch('ebilling.this.check_status', side_effect=fake) as check:
+        with mock.patch('ebilling.mtn.check_status', side_effect=fake) as check:
             batches, totals = self.run_all(status='PENDING', app='ebilling')
         self.assertEqual(check.call_count, 3)  # other app and completed record skipped
         self.assertEqual(batches, 2)  # batch size 2 -> 2 + 1
@@ -239,14 +400,14 @@ class BulkCheckTests(PaymentTestCase):
         self.assertEqual(EBill.objects.get(uuid=first).status, 'SUCCESSFUL')
         self.assertEqual(EBill.objects.get(pk=self.other_app.pk).status, 'PENDING')
 
-    @mock.patch('ebilling.this.get_token', return_value='tok')
-    @mock.patch('ebilling.this.check_status', return_value=mtn_status_response(None, code=404))
+    @mock.patch('ebilling.mtn.get_token', return_value='tok')
+    @mock.patch('ebilling.mtn.check_status', return_value=mtn_status_response(None, code=404))
     def test_fail_not_found_option(self, _check, _token):
         _, totals = self.run_all(app='ebilling', fail_not_found='1')
         self.assertEqual(totals['failed'], 3)
         self.assertFalse(EBill.objects.filter(app='ebilling', status='PENDING').exists())
 
-    @mock.patch('ebilling.this.get_token', return_value=None)
+    @mock.patch('ebilling.mtn.get_token', return_value=None)
     def test_reports_token_failure(self, _token):
         r = self.client.post('/dashboard/transactions/check/', {'after': 0})
         self.assertEqual(r.status_code, 503)
@@ -260,8 +421,8 @@ class BulkCheckTests(PaymentTestCase):
 
 
 class PayerBackfillTests(PaymentTestCase):
-    @mock.patch('ebilling.this.get_account_holder_name', return_value='AMA SERWAA')
-    @mock.patch('ebilling.this.check_status', return_value=mtn_status_response('SUCCESSFUL', payer='233249998888'))
+    @mock.patch('ebilling.mtn.get_account_holder_name', return_value='AMA SERWAA')
+    @mock.patch('ebilling.mtn.check_status', return_value=mtn_status_response('SUCCESSFUL', payer='233249998888'))
     def test_status_check_backfills_number_and_name(self, _check, lookup):
         from .payments import check_with_mtn
         bill = self.make_bill()
@@ -270,8 +431,8 @@ class PayerBackfillTests(PaymentTestCase):
         self.assertEqual((bill.momo_number, bill.momo_name), ('233249998888', 'AMA SERWAA'))
         lookup.assert_called_once_with('tok', '233249998888')
 
-    @mock.patch('ebilling.this.get_account_holder_name')
-    @mock.patch('ebilling.this.check_status', return_value=mtn_status_response('PENDING', payer='233200000000'))
+    @mock.patch('ebilling.mtn.get_account_holder_name')
+    @mock.patch('ebilling.mtn.check_status', return_value=mtn_status_response('PENDING', payer='233200000000'))
     def test_existing_payer_details_are_kept(self, _check, lookup):
         from .payments import check_with_mtn
         bill = self.make_bill(momo_number='233241234567', momo_name='KOFI MENSAH')
@@ -299,19 +460,238 @@ class AccountHolderLookupTests(TestCase):
         resp.json.return_value = body
         return resp
 
-    @mock.patch('ebilling.this.requests.get')
+    @mock.patch('ebilling.mtn.requests.get')
     def test_name_from_mtn(self, get):
-        from . import this
+        from . import mtn as this
         get.return_value = self.fake_response(200, {'given_name': 'Kofi', 'family_name': 'Mensah'})
         self.assertEqual(this.get_account_holder_name('tok', '233241234567'), 'Kofi Mensah')
         self.assertIn('/accountholder/msisdn/233241234567/basicuserinfo', get.call_args.args[0])
         get.return_value = self.fake_response(200, {'name': 'KOFI MENSAH', 'given_name': 'Kofi'})
         self.assertEqual(this.get_account_holder_name('tok', '233241234567'), 'KOFI MENSAH')
 
-    @mock.patch('ebilling.this.requests.get')
+    @mock.patch('ebilling.mtn.requests.get')
     def test_lookup_failures_return_blank(self, get):
-        from . import this
+        from . import mtn as this
         get.return_value = self.fake_response(404, {})
         self.assertEqual(this.get_account_holder_name('tok', '233241234567'), '')
         get.side_effect = this.requests.exceptions.Timeout()
         self.assertEqual(this.get_account_holder_name('tok', '233241234567'), '')
+
+
+class ReportTests(PaymentTestCase):
+    def setUp(self):
+        super().setUp()
+        self.client.force_login(User.objects.create_user('staff', password='pw', is_staff=True))
+        self.make_bill(amount='40.00', status='SUCCESSFUL', transaction_complete=True)
+        self.make_bill(amount='10.55', status='SUCCESSFUL', transaction_complete=True)
+        self.make_bill(amount='99.00', status='FAILED', transaction_complete=True)
+        self.make_bill(amount='5.00')  # pending
+
+    def test_deduction_is_one_percent_of_successful_payments_only(self):
+        r = self.client.get('/dashboard/reports/?period=yearly')
+        totals = r.context['totals']
+        self.assertEqual(str(totals['collected']), '50.55')
+        self.assertEqual(str(totals['fee']), '0.51')   # 0.40 + 0.11, each day rounded half-up
+        self.assertEqual(str(totals['net']), '50.04')
+        self.assertContains(r, 'Deduction (1%)')
+        self.assertContains(r, 'Rate (%)')
+
+    def test_dashboard_collected_card_shows_deduction(self):
+        r = self.client.get('/dashboard/')
+        self.assertContains(r, 'From successful payments')
+        self.assertContains(r, 'Less 1%')
+
+    def test_pdf_and_csv_exports(self):
+        r = self.client.get('/dashboard/reports/?period=yearly&export=pdf')
+        self.assertEqual(r['Content-Type'], 'application/pdf')
+        self.assertTrue(r.content.startswith(b'%PDF'))
+        csv_text = self.client.get('/dashboard/reports/?period=yearly&export=csv').content.decode()
+        self.assertIn('Deduction (1%)', csv_text)
+        self.assertIn('Total', csv_text)
+
+    def test_empty_period_exports_without_error(self):
+        r = self.client.get('/dashboard/reports/?period=custom&from=2001-01-01&to=2001-01-03&export=pdf')
+        self.assertTrue(r.content.startswith(b'%PDF'))
+
+
+class PagerTests(PaymentTestCase):
+    def test_three_numbers_around_current_page_with_arrows(self):
+        self.client.force_login(User.objects.create_user('staff', password='pw', is_staff=True))
+        for _ in range(260):
+            self.make_bill()
+        html = self.client.get('/dashboard/transactions/?page=3&status=PENDING').content.decode()
+        for expected in ('page=1"', 'page=2"', 'page=4"', 'page=6"', 'status=PENDING&page=4'):
+            self.assertIn(expected, html)
+        self.assertEqual(html.count('pager-btn active'), 1)
+
+
+class FailureReasonTests(PaymentTestCase):
+    def test_extract_reason_handles_both_mtn_formats(self):
+        from .payments import extract_reason, failure_text
+        self.assertEqual(extract_reason({'reason': 'EXPIRED'}), 'EXPIRED')
+        self.assertEqual(extract_reason({'reason': {'code': 'NOT_ENOUGH_FUNDS', 'message': 'x'}}), 'NOT_ENOUGH_FUNDS')
+        self.assertEqual(extract_reason({'status': 'FAILED'}), '')
+        self.assertIn('PIN not entered', failure_text('EXPIRED'))
+        self.assertEqual(failure_text('SOMETHING_NEW'), 'Something new')
+        self.assertEqual(failure_text(''), '')
+
+    @mock.patch('ebilling.mtn.get_token', return_value='tok')
+    def test_reason_is_recorded_from_mtn_and_shown(self, _token):
+        self.client.force_login(User.objects.create_user('staff', password='pw', is_staff=True))
+        bill = self.make_bill()
+        body = json.dumps({'status': 'FAILED', 'reason': 'EXPIRED'})
+        with mock.patch('ebilling.mtn.check_status', return_value={
+                'success': True, 'status_code': 200, 'raw_response_text': body}):
+            r = post_json(self.client, '/bill/callback/', {'reference_id': bill.uuid})
+        self.assertEqual(r.json()['reason_code'], 'EXPIRED')
+        self.assertIn('PIN not entered', r.json()['reason'])
+        bill.refresh_from_db()
+        self.assertEqual(bill.failure_reason, 'EXPIRED')
+        self.assertContains(self.client.get(f'/dashboard/transactions/{bill.pk}/'), 'Reason for failure')
+        self.assertContains(self.client.get('/dashboard/transactions/'), 'PIN not entered')
+        self.assertIn('PIN not entered', self.client.get('/dashboard/transactions/?export=csv').content.decode())
+
+    @mock.patch('ebilling.mtn.get_token', return_value='tok')
+    def test_backfill_command_fills_missing_reasons_only(self, _token):
+        missing = self.make_bill(status='FAILED', transaction_complete=True)
+        have = self.make_bill(status='FAILED', transaction_complete=True, failure_reason='EXPIRED')
+        body = json.dumps({'status': 'FAILED', 'reason': {'code': 'APPROVAL_REJECTED'}})
+        with mock.patch('ebilling.mtn.check_status',
+                        return_value={'success': True, 'raw_response_text': body}) as check:
+            call_command('recheck_pending', '--backfill-reasons', '--pause', '0', stdout=StringIO())
+        self.assertEqual(check.call_count, 1)
+        missing.refresh_from_db(); have.refresh_from_db()
+        self.assertEqual(missing.failure_reason, 'APPROVAL_REJECTED')
+        self.assertEqual(have.failure_reason, 'EXPIRED')
+
+
+class ApiProtectionTests(PaymentTestCase):
+    def test_bill_is_rate_limited_per_ip(self):
+        statuses = [post_json(self.client, '/bill/', {}).status_code for _ in range(32)]
+        self.assertEqual(statuses[:30], [403] * 30)   # rejected (no credentials) but not yet throttled
+        self.assertEqual(statuses[30:], [429, 429])
+        # another address has its own allowance
+        self.assertEqual(post_json(self.client, '/bill/', {}, REMOTE_ADDR='203.0.113.5').status_code, 403)
+
+    @mock.patch('ebilling.mtn.get_account_holder_name', return_value='')
+    @mock.patch('ebilling.mtn.request_to_pay',
+                return_value={'success': True, 'status_code': 202, 'message': 'ok'})
+    @mock.patch('ebilling.mtn.get_token', return_value='tok')
+    def test_repeated_request_sends_only_one_prompt(self, _token, request_to_pay, _lookup):
+        Application.objects.create(name='ebilling', url='http://x', key='k', ip_address='127.0.0.1')
+        body = {'app': 'ebilling', 'app_key': 'k', 'amount': 20, 'momo_number': '0241234567', 'device_id': 'M1'}
+        first = post_json(self.client, '/bill/', body).json()
+        second = post_json(self.client, '/bill/', body).json()
+        self.assertEqual(request_to_pay.call_count, 1)
+        self.assertEqual(EBill.objects.count(), 1)
+        self.assertEqual(first['momo_request']['request_reference_id'], second['momo_request']['request_reference_id'])
+        self.assertTrue(second['duplicate'])
+
+        # a different amount, or the same request once the first is no longer pending, is a new payment
+        post_json(self.client, '/bill/', dict(body, amount=25))
+        self.assertEqual(EBill.objects.count(), 2)
+        EBill.objects.update(status='FAILED')
+        post_json(self.client, '/bill/', body)
+        self.assertEqual(EBill.objects.count(), 3)
+
+
+@mock.patch('ebilling.mtn.get_token', return_value='tok')
+class CallbackOutcomeTests(PaymentTestCase):
+    def setUp(self):
+        super().setUp()
+        self.client.force_login(User.objects.create_user('staff', password='pw', is_staff=True))
+
+    def send(self, body, mtn_status=None, **extra):
+        with mock.patch('ebilling.mtn.check_status', return_value=mtn_status or mtn_status_response('PENDING')):
+            self.client.put('/bill/mtn-callback/', json.dumps(body), content_type='application/json', **extra)
+        return CallBacks.objects.latest('pk')
+
+    def test_confirmed_callback_is_linked_and_recorded(self, _token):
+        bill = self.make_bill()
+        log = self.send({'externalId': bill.uuid, 'status': 'SUCCESSFUL'}, mtn_status_response('SUCCESSFUL'))
+        self.assertEqual((log.ebill, log.reference, log.outcome), (bill, bill.uuid, 'processed'))
+        self.assertEqual((log.claimed_status, log.verified_status), ('SUCCESSFUL', 'SUCCESSFUL'))
+
+    def test_repeat_callback_is_already_recorded(self, _token):
+        bill = self.make_bill(status='SUCCESSFUL', transaction_complete=True)
+        self.assertEqual(self.send({'externalId': bill.uuid, 'status': 'SUCCESSFUL'}).outcome, 'already_processed')
+
+    def test_claim_mtn_does_not_confirm_is_flagged(self, _token):
+        bill = self.make_bill()
+        log = self.send({'externalId': bill.uuid, 'status': 'SUCCESSFUL'}, mtn_status_response('PENDING'))
+        self.assertEqual(log.outcome, 'unconfirmed')
+        bill.refresh_from_db()
+        self.assertFalse(bill.transaction_complete)
+
+    def test_claim_that_contradicts_mtn_is_a_mismatch_and_mtn_wins(self, _token):
+        bill = self.make_bill()
+        log = self.send({'externalId': bill.uuid, 'status': 'SUCCESSFUL'}, mtn_status_response('FAILED'))
+        self.assertEqual(log.outcome, 'mismatch')
+        bill.refresh_from_db()
+        self.assertEqual(bill.status, 'FAILED')
+
+    def test_pending_unknown_and_invalid_callbacks(self, _token):
+        bill = self.make_bill()
+        self.assertEqual(self.send({'externalId': bill.uuid, 'status': 'PENDING'}).outcome, 'pending')
+        ghost = str(uuid.uuid4())
+        log = self.send({'externalId': ghost, 'status': 'SUCCESSFUL'})
+        self.assertEqual((log.outcome, log.reference, log.ebill), ('unknown_reference', ghost, None))
+        self.client.put('/bill/mtn-callback/', 'not json', content_type='application/json')
+        self.assertEqual(CallBacks.objects.latest('pk').outcome, 'invalid')
+
+    def test_mtn_unreachable_is_unverified(self, _token):
+        bill = self.make_bill()
+        log = self.send({'externalId': bill.uuid, 'status': 'SUCCESSFUL'},
+                        {'success': False, 'status_code': None, 'message': 'timeout'})
+        self.assertEqual(log.outcome, 'unverified')
+
+    def test_pages_show_links_outcomes_and_filters(self, _token):
+        bill = self.make_bill()
+        self.send({'externalId': bill.uuid, 'status': 'SUCCESSFUL'}, mtn_status_response('SUCCESSFUL'))
+        self.send({'externalId': str(uuid.uuid4()), 'status': 'SUCCESSFUL'})
+        listing = self.client.get('/dashboard/callbacks/')
+        self.assertContains(listing, 'Recorded')
+        self.assertContains(listing, f'/dashboard/transactions/{bill.pk}/')
+        self.assertContains(listing, 'No matching payment')
+        attention = self.client.get('/dashboard/callbacks/?outcome=attention')
+        self.assertEqual(len(attention.context['page']), 1)
+        self.assertContains(attention, 'Unknown reference')
+        self.assertEqual(len(self.client.get('/dashboard/callbacks/?q=' + bill.uuid[:8]).context['page']), 1)
+        # the payment's own page lists its callbacks, and a callback links back to the payment
+        self.assertContains(self.client.get(f'/dashboard/transactions/{bill.pk}/'), 'Callbacks from MTN')
+        log = bill.callbacks.get()
+        self.assertContains(self.client.get(f'/dashboard/callbacks/{log.pk}/'), 'MTN confirmed the result')
+
+    def test_old_callbacks_without_outcome_still_display(self, _token):
+        old = CallBacks.objects.create(url='u', method='PUT', contents='{}', ip_address='127.0.0.1')
+        self.assertContains(self.client.get('/dashboard/callbacks/'), 'No matching payment', count=0)
+        self.assertEqual(self.client.get(f'/dashboard/callbacks/{old.pk}/').status_code, 200)
+
+    def test_health_warns_about_payments_with_no_callback(self, _token):
+        from .dashboard.common import callback_health
+        long_ago = timezone.now() - timedelta(hours=2)
+        waiting = self.make_bill(request_sent=True)
+        has_callback = self.make_bill(request_sent=True)
+        self.make_bill(request_sent=True)  # too recent to worry about
+        EBill.objects.filter(pk__in=[waiting.pk, has_callback.pk]).update(request_datetime=long_ago)
+        CallBacks.objects.create(url='u', method='PUT', contents='{}', ip_address='127.0.0.1', ebill=has_callback)
+        health = callback_health()
+        self.assertEqual(health['stale_pending'], 1)
+        self.assertEqual(health['last_day'], 1)
+        self.assertContains(self.client.get('/dashboard/'), 'with no callback from MTN')
+        self.assertContains(self.client.get('/dashboard/callbacks/'), 'Last callback received')
+
+
+class CallbackBackfillTests(PaymentTestCase):
+    def test_old_callbacks_are_linked_to_their_payments(self):
+        import importlib
+        from django.apps import apps
+        migration = importlib.import_module('ebilling.migrations.0009_backfill_callback_links')
+        bill = self.make_bill()
+        old = CallBacks.objects.create(url='u', method='PUT', ip_address='127.0.0.1',
+                                       contents=json.dumps({'externalId': bill.uuid, 'status': 'successful'}))
+        junk = CallBacks.objects.create(url='u', method='PUT', ip_address='127.0.0.1', contents='not json')
+        migration.link_existing_callbacks(apps, None)
+        old.refresh_from_db(); junk.refresh_from_db()
+        self.assertEqual((old.ebill, old.reference, old.claimed_status, old.outcome), (bill, bill.uuid, 'SUCCESSFUL', ''))
+        self.assertEqual((junk.ebill, junk.reference), (None, ''))

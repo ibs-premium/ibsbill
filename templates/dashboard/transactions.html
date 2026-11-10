@@ -79,7 +79,7 @@
             <td class="text-nowrap">{{ b.username|default:"—" }}</td>
             <td class="mono">{{ b.device_id }}</td>
             <td class="num">{{ b.amount|money }}</td>
-            <td>{% include 'dashboard/_status.html' with status=b.status %}</td>
+            <td>{% include 'dashboard/_status.html' with status=b.status reason=b.failure_reason %}</td>
             <td>{% if b.credited %}<i data-lucide="circle-check" class="flag on"></i>{% else %}<i data-lucide="circle-minus" class="flag"></i>{% endif %}</td>
           </tr>
         {% empty %}

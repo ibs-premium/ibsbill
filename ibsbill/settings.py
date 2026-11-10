@@ -10,12 +10,11 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 from pathlib import Path
-import os
-from django.contrib.messages import constants as messages
+
 from decouple import config, Csv
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
-from django.contrib.messages import constants as message_constants
 
 
 # Quick-start development settings - unsuitable for production
@@ -72,6 +71,12 @@ AXES_RESET_ON_SUCCESS = True
 AXES_IPWARE_META_PRECEDENCE_ORDER = ['HTTP_X_FORWARDED_FOR', 'REMOTE_ADDR']
 AXES_IPWARE_PROXY_COUNT = 1
 
+# How many reverse proxies (nginx) sit in front of the app; 0 if none. Used to read the
+# caller's real IP from X-Forwarded-For without trusting what the caller wrote there.
+TRUSTED_PROXY_COUNT = config('TRUSTED_PROXY_COUNT', default=1, cast=int)
+# /bill/ only accepts an application from the IP address registered for it.
+ENFORCE_APP_IP = config('ENFORCE_APP_IP', default=True, cast=bool)
+
 ROOT_URLCONF = 'ibsbill.urls'
 
 TEMPLATES = [
@@ -96,10 +101,34 @@ WSGI_APPLICATION = 'ibsbill.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
-DATABASES = {
+# SQLite is fine for development. For production set DB_ENGINE=postgresql (and the DB_* values)
+# in .env; this needs `pip install "psycopg[binary]"`.
+if config('DB_ENGINE', default='sqlite') == 'postgresql':
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': config('DB_NAME'),
+            'USER': config('DB_USER'),
+            'PASSWORD': config('DB_PASSWORD'),
+            'HOST': config('DB_HOST', default='localhost'),
+            'PORT': config('DB_PORT', default='5432'),
+            'CONN_MAX_AGE': 60,
+        }
+    }
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
+    }
+
+# The MTN access token and the API rate limits live in the cache. It must be shared by all
+# gunicorn workers, so it is file-based rather than the per-process default.
+CACHES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
+        'LOCATION': config('CACHE_DIR', default=str(BASE_DIR / 'cache')),
     }
 }
 
@@ -140,10 +169,8 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = '/static/'
-STATICFILES_DIRS = (os.path.join(BASE_DIR, 'static'),)
-STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
-MEDIA_URL = '/media/'
-MEDIA_ROOT = os.path.join(BASE_DIR, 'media/')
+STATICFILES_DIRS = [BASE_DIR / 'static']
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 
 # Default primary key field type
@@ -157,8 +184,8 @@ EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = 'smtp.gmail.com'
 EMAIL_PORT = 587
 EMAIL_USE_TLS = True
-EMAIL_HOST_USER = config('EMAIL_HOST_USER')
-EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD')
+EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')
+EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
 DEFAULT_FROM_EMAIL = 'IBS BILLS'
 
 # --- Production hardening (active whenever DEBUG is False) ---

@@ -15,7 +15,7 @@
         <label class="form-label" for="app">Application</label>
         <select class="form-select" id="app" required>
           {% for app in apps %}
-            <option value="{{ app.name }}" data-key="{{ app.key }}">{{ app.name }}</option>
+            <option value="{{ app.name }}">{{ app.name }}</option>
           {% empty %}
             <option value="">No applications registered</option>
           {% endfor %}
@@ -73,8 +73,9 @@
 {% block scripts %}
 <script>
 (function () {
-  const BILL_URL = "{% url 'bill' %}";
-  const STATUS_URL = "{% url 'bill_status' %}";
+  const BILL_URL = "{% url 'dashboard:pay_start' %}";
+  const STATUS_URL = "{% url 'dashboard:pay_status' %}";
+  const CSRF = "{{ csrf_token }}";
   const TX_URL = "{% url 'dashboard:transactions' %}";
   const POLL_MS = 10000;
   const MAX_POLLS = 30; // stop after ~5 minutes
@@ -123,7 +124,7 @@
     btn.querySelector('span').textContent = on ? 'Sending…' : 'Send payment request';
   }
 
-  function finish(status, ref) {
+  function finish(status, ref, reason) {
     clearInterval(timer);
     timer = null;
     busy(false);
@@ -134,29 +135,29 @@
     } else if (status === 'FAILED') {
       step('approve', 'bad', 'Declined or failed ' + now());
       step('final', 'bad', 'Failed ' + now());
-      show('failed', 'circle-x', 'Payment failed', 'The customer declined, or MTN rejected the payment.', ref);
+      show('failed', 'circle-x', 'Payment failed', reason || 'The customer declined, or MTN rejected the payment.', ref);
     } else {
       step('final', '', 'Stopped checking at ' + now());
       show('', 'clock', 'Still pending', 'No final status after 5 minutes. Check the transaction later.', ref);
     }
   }
 
-  function poll(ref, token) {
+  function poll(ref) {
     let count = 0;
     const check = async () => {
       count += 1;
       try {
         const res = await fetch(STATUS_URL, {
           method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({reference_id: ref, token: token}),
+          headers: {'Content-Type': 'application/json', 'X-CSRFToken': CSRF},
+          body: JSON.stringify({reference_id: ref}),
         });
         const data = await res.json();
         let status = data.status;
         if (!status && data.raw_response_text) {
           try { status = JSON.parse(data.raw_response_text).status; } catch (e) {}
         }
-        if (status === 'SUCCESSFUL' || status === 'FAILED') return finish(status, ref);
+        if (status === 'SUCCESSFUL' || status === 'FAILED') return finish(status, ref, data.reason);
       } catch (e) { /* network blip — try again next tick */ }
       if (count >= MAX_POLLS) finish('TIMEOUT', ref);
     };
@@ -193,10 +194,9 @@
     try {
       const res = await fetch(BILL_URL, {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
+        headers: {'Content-Type': 'application/json', 'X-CSRFToken': CSRF},
         body: JSON.stringify({
           app: appSel.value,
-          app_key: appSel.selectedOptions[0].dataset.key,
           amount: amount,
           momo_number: momo,
           device_id: device,
@@ -217,7 +217,7 @@
       step('approve', 'wait', 'Waiting for ' + who + '…');
       show('pending', 'loader-circle', 'Waiting for approval',
            'A prompt was sent to ' + who + '. Checking every 10 seconds.', req.request_reference_id);
-      poll(req.request_reference_id, req.token);
+      poll(req.request_reference_id);
     } catch (err) {
       busy(false);
       step('sent', 'bad', 'Error ' + now());

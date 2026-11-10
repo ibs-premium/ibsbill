@@ -3,10 +3,12 @@
     python manage.py recheck_pending --dry-run      # see what would change
     python manage.py recheck_pending                # record the results
     python manage.py recheck_pending --fail-not-found
+    python manage.py recheck_pending --backfill-reasons   # add MTN's reason to FAILED payments that lack one
 
 Safe to run repeatedly (e.g. from a scheduled task): only SUCCESSFUL/FAILED
 results are recorded and completed records are never touched again.
 """
+import json
 import time
 from datetime import timedelta
 
@@ -14,9 +16,9 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils import timezone
 
-from ebilling import this
+from ebilling import mtn
 from ebilling.models import EBill
-from ebilling.payments import apply_final_status, check_with_mtn
+from ebilling.payments import apply_final_status, check_with_mtn, extract_reason, failure_text
 
 TOKEN_LIFETIME = timedelta(minutes=50)  # MTN tokens last an hour; renew before that
 
@@ -32,11 +34,44 @@ class Command(BaseCommand):
         parser.add_argument('--fail-not-found', action='store_true',
                             help='Mark records FAILED when MTN has no record of the reference '
                                  '(the request never reached MTN).')
+        parser.add_argument('--backfill-reasons', action='store_true',
+                            help='Instead of checking pending payments, fetch the failure reason from MTN '
+                                 'for FAILED payments that have none recorded.')
         parser.add_argument('--dry-run', action='store_true', help='Check with MTN but save nothing.')
         parser.add_argument('--pause', type=float, default=0.2, metavar='SECONDS',
                             help='Wait between MTN calls to stay under rate limits (default 0.2).')
 
+    def backfill_reasons(self, opts):
+        bills = list(EBill.objects.filter(status='FAILED', failure_reason='').order_by('request_datetime'))
+        if opts['limit']:
+            bills = bills[:opts['limit']]
+        if not bills:
+            self.stdout.write('No failed payments are missing a reason.')
+            return
+        token = mtn.get_token()
+        if token is None:
+            raise CommandError('Could not get an access token from MTN. Check the MTN credentials in .env.')
+        self.stdout.write(f'Fetching the reason for {len(bills)} failed payment(s)...')
+        found = 0
+        for i, ebill in enumerate(bills, 1):
+            result = mtn.check_status(ebill.uuid, token)
+            try:
+                reason = extract_reason(json.loads(result.get('raw_response_text') or '{}'))
+            except json.JSONDecodeError:
+                reason = ''
+            if reason:
+                found += 1
+                if not opts['dry_run']:
+                    ebill.failure_reason = reason
+                    ebill.save(update_fields=['failure_reason'])
+            self.stdout.write(f'  [{i}/{len(bills)}] {ebill.uuid}: {failure_text(reason) or "no reason given"}')
+            if opts['pause']:
+                time.sleep(opts['pause'])
+        self.stdout.write(self.style.SUCCESS(f'Done. Reason found for {found} of {len(bills)}.'))
+
     def handle(self, *args, **opts):
+        if opts['backfill_reasons']:
+            return self.backfill_reasons(opts)
         cutoff = timezone.now() - timedelta(minutes=opts['older_than'])
         pending = EBill.objects.filter(transaction_complete=False, status='PENDING',
                                        request_datetime__lte=cutoff).order_by('request_datetime')
@@ -54,7 +89,7 @@ class Command(BaseCommand):
 
         for i, ebill in enumerate(pending, 1):
             if token is None or timezone.now() - token_time > TOKEN_LIFETIME:
-                token, token_time = this.get_token(), timezone.now()
+                token, token_time = mtn.get_token(), timezone.now()
                 if token is None:
                     raise CommandError('Could not get an access token from MTN. Check the MTN credentials in .env.')
 
