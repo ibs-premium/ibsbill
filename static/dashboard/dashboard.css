@@ -394,7 +394,7 @@ a.pager-btn:hover { background: var(--neutral-50); border-color: var(--neutral-3
 .pager-btn.active { background: var(--brand-700); border-color: var(--brand-700); color: #fff; font-weight: 600; }
 .pager-btn.disabled { opacity: .4; cursor: not-allowed; }
 
-.health { display: flex; flex-wrap: wrap; gap: 24px 48px; padding: 14px 20px; }
+.health { display: flex; flex-wrap: wrap; gap: 24px 48px; }
 .text-danger { color: var(--rose-600); }
 
 .spin { animation: spin 1s linear infinite; }
