@@ -7,7 +7,7 @@ from unittest import mock
 from django.contrib.auth.models import User
 from django.core.cache import cache
 from django.core.management import call_command
-from django.test import TestCase, override_settings
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
 from .models import Application, CallBacks, EBill
@@ -728,3 +728,59 @@ class ApplicationAddressTests(PaymentTestCase):
         for i, (ip, expected) in enumerate((('10.0.4.170', 200), ('10.0.5.156', 200), ('10.0.4.218', 403))):
             r = post_json(self.client, '/bill/', dict(body, device_id=f'M{i}'), REMOTE_ADDR=ip)
             self.assertEqual(r.status_code, expected, ip)
+
+
+class BackupDbTests(PaymentTestCase):
+    def run_backup(self, dest, **opts):
+        out = StringIO()
+        call_command('backup_db', dest=str(dest), stdout=out, **opts)
+        return out.getvalue()
+
+    def test_only_the_newest_backups_are_kept(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            old = []
+            for i in range(4):
+                f = Path(tmp) / f'ibsbill-2020010{i}-000000.sqlite3.gz'
+                f.write_bytes(b'x')
+                os.utime(f, (1_600_000_000 + i, 1_600_000_000 + i))
+                old.append(f)
+            (Path(tmp) / 'notes.txt').write_text('not a backup')
+            self.run_backup(tmp, keep=2)
+            left = sorted(p.name for p in Path(tmp).iterdir())
+            self.assertEqual(len(left), 3)                          # 2 backups + notes.txt
+            self.assertIn('notes.txt', left)
+            self.assertFalse(old[0].exists())
+            self.assertFalse(old[1].exists())
+            self.assertFalse(old[2].exists())                       # the new backup outranks them all
+
+    def test_keep_must_be_positive(self):
+        from django.core.management.base import CommandError
+        with self.assertRaises(CommandError):
+            call_command('backup_db', keep=0, stdout=StringIO())
+
+
+class BackupDbDataTests(TransactionTestCase):
+    """Needs real commits (no wrapping test transaction), like a live run of the command."""
+
+    def test_sqlite_backup_is_a_valid_copy(self):
+        import gzip
+        import sqlite3
+        import tempfile
+        from pathlib import Path
+        Application.objects.create(name='backed-up-app', url='u', key='k', ip_address='10.0.0.1')
+        with tempfile.TemporaryDirectory() as tmp:
+            call_command('backup_db', dest=tmp, stdout=StringIO())
+            files = list(Path(tmp).glob('ibsbill-*.sqlite3.gz'))
+            self.assertEqual(len(files), 1)
+            restored = Path(tmp) / 'restored.sqlite3'
+            restored.write_bytes(gzip.decompress(files[0].read_bytes()))
+            conn = sqlite3.connect(str(restored))
+            try:
+                names = [r[0] for r in conn.execute('select name from ebilling_application')]
+            finally:
+                conn.close()
+            self.assertEqual(names, ['backed-up-app'])
+            self.assertFalse(list(Path(tmp).glob('ibsbill-*.sqlite3')))   # no uncompressed copy left behind

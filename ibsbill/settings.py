@@ -132,6 +132,10 @@ CACHES = {
     }
 }
 
+# Database backups written by `python manage.py backup_db` (see deploy/ibsbill-backup.timer).
+BACKUP_DIR = config('BACKUP_DIR', default=str(BASE_DIR / 'backups'))
+BACKUP_KEEP = config('BACKUP_KEEP', default=14, cast=int)  # how many of the newest backups to keep
+
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators

@@ -70,6 +70,7 @@ EMAIL_HOST_PASSWORD=<app password>
 | `ENFORCE_APP_IP` | Default `True`, but set it `False` while eBilling calls from customers' browsers (the caller's IP is then the customer's own). When on: `/bill/` only accepts an application from the IP addresses registered for it (a list of addresses and ranges such as `10.0.4.170, 10.0.5.0/24`). |
 | `COLLECTION_FEE_PERCENT` | Deduction shown in the reports (default `1`). |
 | `DB_ENGINE` | `sqlite` (default) or `postgresql`. For PostgreSQL also set `DB_NAME`, `DB_USER`, `DB_PASSWORD` (and `DB_HOST`, `DB_PORT`) and run `pip install "psycopg[binary]"`. Use PostgreSQL in production. |
+| `BACKUP_DIR`, `BACKUP_KEEP` | Folder for `backup_db` backups (default `./backups`) and how many to keep (default `14`). |
 | `CACHE_DIR` | Where the shared cache lives (default `./cache`). Holds the MTN token and the rate-limit counters, so all gunicorn workers must be able to read and write it. |
 
 Then create the database tables and a first staff user:
@@ -175,6 +176,15 @@ The API endpoints are rate limited per IP (`/bill/` 30 a minute, the others 240)
 
 Only active users with **Staff status** can sign in.
 
+## Backups
+
+```bash
+python manage.py backup_db              # write a backup to BACKUP_DIR (default ./backups)
+python manage.py backup_db --keep 30    # keep the newest 30 (default 14, the BACKUP_KEEP setting)
+```
+
+SQLite is written as `ibsbill-<time>.sqlite3.gz`; PostgreSQL uses `pg_dump` (install `postgresql-client`) and writes `ibsbill-<time>.dump`, restored with `pg_restore`. Files are readable only by the running user. `deploy/ibsbill-backup.service` and `.timer` run it nightly at about 02:30: install them like the re-check timer. Copy the folder off the server too; a backup on the same disk does not survive losing the server.
+
 ## Management command
 
 ```bash
@@ -207,13 +217,13 @@ ebilling/
   dashboard_urls.py      Dashboard routes
   forms.py               Application and staff login forms
   models.py              EBill (payments), Application, CallBacks
-  management/commands/   recheck_pending
+  management/commands/   recheck_pending, backup_db
   templatetags/          money, status and JSON display filters
   tests.py
 templates/dashboard/     Dashboard templates
 static/dashboard/        Dashboard CSS and IBS / eBilling logos
 docs/STAFF_MANUAL.md     Staff user manual
-deploy/                  systemd timer for recheck_pending
+deploy/                  systemd timers: recheck_pending (every 15 min) and backup_db (nightly)
 ```
 
 ## Deployment notes

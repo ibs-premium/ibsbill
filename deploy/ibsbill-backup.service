@@ -1,0 +1,10 @@
+[Unit]
+Description=IBS MoMo gateway: back up the database
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Adjust the user and the paths to match your server (same as ibsbill-recheck.service).
+User=ibsbill
+WorkingDirectory=/srv/ibsbill
+ExecStart=/srv/ibsbill/venv/bin/python manage.py backup_db

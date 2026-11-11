@@ -331,6 +331,39 @@ python manage.py recheck_pending --backfill-reasons
 
 Run this once at most. MTN no longer gives a reason for older payments, so running it again finds nothing new.
 
+### Database backups
+
+The gateway backs up its database every night at about 02:30 (`ibsbill-backup.timer`) and keeps the newest 14 backups in `/srv/ibsbill/backups`. Backup files are readable only by the gateway's user, because they contain every payment and the application keys.
+
+To install the schedule on a server, copy `deploy/ibsbill-backup.service` and `deploy/ibsbill-backup.timer` to `/etc/systemd/system/`, make sure `User=`, `WorkingDirectory=` and the python path in the `.service` file match the server (the same as for the re-check), then:
+
+```
+sudo systemctl daemon-reload
+sudo systemctl enable --now ibsbill-backup.timer
+systemctl list-timers | grep ibsbill
+```
+
+To take a backup right now, for example before an update:
+
+```
+cd /srv/ibsbill && source venv/bin/activate
+python manage.py backup_db
+ls -lh backups/
+```
+
+A PostgreSQL database needs the `pg_dump` tool (`sudo apt install postgresql-client`). Backups are `ibsbill-<date>-<time>.dump` (PostgreSQL) or `.sqlite3.gz` (SQLite).
+
+**Copy the backups off the server.** A backup on the same disk is lost if the server is. Copy the folder somewhere else regularly, for example to another machine or to cloud storage.
+
+**Restoring.** Stop the gateway first (`sudo systemctl stop ibsbill`), restore, then start it again.
+
+```
+pg_restore --clean --if-exists --no-owner -d DBNAME backups/ibsbill-DATE-TIME.dump    # PostgreSQL
+gunzip -c backups/ibsbill-DATE-TIME.sqlite3.gz > db.sqlite3                          # SQLite
+```
+
+Practise a restore on a spare copy once, so it is not the first time during an emergency.
+
 ### Settings an administrator may change
 
 These go in the server's `.env` file (see [README.md](../README.md)):
@@ -344,6 +377,7 @@ These go in the server's `.env` file (see [README.md](../README.md)):
 | `MTN_CALLBACK_URL` | The public HTTPS address MTN calls with results: `https://ibsbill.org/bill/mtn-callback/`. |
 | `CACHE_DIR` | Folder shared by the gateway's workers (default `./cache`, i.e. `/srv/ibsbill/cache`). It must be owned by the user the gateway runs as, with mode 700. A wrong owner makes every payment request fail with a server error. |
 | `DB_ENGINE` | `sqlite` or `postgresql` (production). |
+| `BACKUP_DIR`, `BACKUP_KEEP` | Where nightly database backups go (default `/srv/ibsbill/backups`) and how many of the newest to keep (default 14). |
 
 After changing `.env`, restart the gateway: `sudo systemctl restart ibsbill`.
 
@@ -393,9 +427,11 @@ Do these on the live server, in `/srv/ibsbill`, as the deployment user.
 **1. Back up the database first.** Some updates change the database permanently.
 
 ```
-pg_dump DBNAME > ~/ibsbill-$(date +%F).sql        # PostgreSQL
-cp db.sqlite3 ~/db.sqlite3.bak-$(date +%F)        # SQLite
+cd /srv/ibsbill && source venv/bin/activate
+python manage.py backup_db
 ```
+
+The backup is written to `/srv/ibsbill/backups/`; check it with `ls -lh backups/`.
 
 **2. Get the new code and its requirements.**
 

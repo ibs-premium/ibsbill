@@ -199,3 +199,6 @@ db.sqlite3
 
 # Django file cache (MTN token, rate limits)
 cache/
+
+# Database backups (contain payment data and keys)
+backups/
