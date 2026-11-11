@@ -185,6 +185,38 @@ python manage.py backup_db --keep 30    # keep the newest 30 (default 14, the BA
 
 SQLite is written as `ibsbill-<time>.sqlite3.gz`; PostgreSQL uses `pg_dump` (install `postgresql-client`) and writes `ibsbill-<time>.dump`, restored with `pg_restore`. Files are readable only by the running user. `deploy/ibsbill-backup.service` and `.timer` run it nightly at about 02:30: install them like the re-check timer. Copy the folder off the server too; a backup on the same disk does not survive losing the server.
 
+## Moving an existing SQLite database to PostgreSQL
+
+Done on the live server on 11 Nov 2026. Do it in a quiet period: the gateway is stopped while the data is copied.
+
+1. Install and prepare PostgreSQL: `sudo apt install postgresql postgresql-client`, then `CREATE ROLE ibsbill LOGIN PASSWORD '...'` and `createdb -O ibsbill -E UTF8 ibsbill` (run as the `postgres` user), and `pip install -r requirements.txt` (includes `psycopg`).
+2. Build the **empty PostgreSQL tables**, with the `DB_*` variables exported in the shell (not yet in `.env`). **Do not run a plain `migrate` on an empty PostgreSQL database**: the early migrations (`0001` creates `status`, `0002` adds it again) fail on PostgreSQL, although SQLite tolerates them. Instead:
+
+   ```bash
+   for a in contenttypes auth admin axes sessions; do python manage.py migrate $a; done
+   python manage.py shell -c "
+   from django.db import connection
+   from ebilling.models import Application, EBill, CallBacks
+   with connection.schema_editor() as se:
+       for m in (Application, EBill, CallBacks): se.create_model(m)"
+   python manage.py migrate ebilling --fake      # mark the old migrations as applied
+   python manage.py migrate                      # should say: No migrations to apply
+   ```
+   New migrations apply normally from here on.
+3. With the gateway stopped, take a `backup_db` backup, then dump from SQLite and load into PostgreSQL:
+
+   ```bash
+   python manage.py dumpdata --natural-foreign --natural-primary \
+     -e contenttypes -e auth.permission -e sessions -e admin.logentry -e axes \
+     --indent 0 -o ~/ibsbill-data.json
+   # export the DB_* variables for PostgreSQL, then:
+   python manage.py loaddata ~/ibsbill-data.json
+   ```
+   Compare row counts for the `auth` and `ebilling` models in both databases. `auth.Permission` may differ: SQLite can hold stale permissions of deleted models. Staff have to sign in again (sessions are not copied).
+4. Add the `DB_*` lines to `.env`, start the gateway, check the dashboard and make a test payment. To go back, delete the `DB_*` lines and restart; the SQLite file is untouched.
+
+Check the target before loading: `python manage.py shell -c "from django.db import connection; print(connection.vendor)"` must print `postgresql`.
+
 ## Management command
 
 ```bash

@@ -331,13 +331,28 @@ python manage.py recheck_pending --backfill-reasons
 
 Run this once at most. MTN no longer gives a reason for older payments, so running it again finds nothing new.
 
+### The database
+
+The live gateway keeps its data in **PostgreSQL**, on the same server: database `ibsbill`, login `ibsbill`. The connection settings (`DB_ENGINE`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`) are in `/srv/ibsbill/.env`. Keep the password somewhere safe; it is not recorded anywhere else.
+
+```
+sudo systemctl status postgresql                      # is the database running?
+cd /tmp && sudo -u postgres psql -d ibsbill -c '\dt'   # list the tables
+```
+
+If the gateway shows *Server error (500)* on every page and the log mentions `connection refused` or `password authentication failed`, check that PostgreSQL is running and that the password in `.env` is the one set for the `ibsbill` login.
+
+The old SQLite file, `/srv/ibsbill/db.sqlite3`, was kept after the move as a fallback. It is no longer updated, so only use it to look something up from before the move. It can be deleted once nobody needs it.
+
 ### Database backups
 
 The gateway backs up its database every night at about 02:30 (`ibsbill-backup.timer`) and keeps the newest 14 backups in `/srv/ibsbill/backups`. Backup files are readable only by the gateway's user, because they contain every payment and the application keys.
 
-To install the schedule on a server, copy `deploy/ibsbill-backup.service` and `deploy/ibsbill-backup.timer` to `/etc/systemd/system/`, make sure `User=`, `WorkingDirectory=` and the python path in the `.service` file match the server (the same as for the re-check), then:
+To install the schedule on a server, copy `deploy/ibsbill-backup.service` and `deploy/ibsbill-backup.timer` to `/etc/systemd/system/`, set `User=` to the account the gateway runs as (find it with `systemctl cat ibsbill | grep ^User=`; on the live server it is `akpene`), and check that `WorkingDirectory=` and the python path match the server, then give that account the backups folder (replace `ACCOUNT`):
 
 ```
+sudo mkdir -p /srv/ibsbill/backups
+sudo chown -R ACCOUNT:ACCOUNT /srv/ibsbill/backups
 sudo systemctl daemon-reload
 sudo systemctl enable --now ibsbill-backup.timer
 systemctl list-timers | grep ibsbill

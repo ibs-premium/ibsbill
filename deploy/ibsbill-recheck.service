@@ -5,6 +5,7 @@ After=network-online.target
 [Service]
 Type=oneshot
 # Adjust the user and the paths to match your server.
+# User must be a real account: copy it from `systemctl cat ibsbill | grep ^User=`
 User=ibsbill
 WorkingDirectory=/srv/ibsbill
 ExecStart=/srv/ibsbill/venv/bin/python manage.py recheck_pending --older-than 10 --limit 200
