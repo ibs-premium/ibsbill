@@ -66,7 +66,7 @@
       <thead>
         <tr>
           <th>Date</th><th>Reference</th><th>Payer</th><th>App</th><th>Username</th><th>Device</th>
-          <th class="num">Amount</th><th>Status</th><th title="Meter credited">Credited</th>
+          <th class="num">Amount</th><th>Status</th>
         </tr>
       </thead>
       <tbody>
@@ -80,10 +80,9 @@
             <td class="mono">{{ b.device_id }}</td>
             <td class="num">{{ b.amount|money }}</td>
             <td>{% include 'dashboard/_status.html' with status=b.status reason=b.failure_reason %}</td>
-            <td>{% if b.credited %}<i data-lucide="circle-check" class="flag on"></i>{% else %}<i data-lucide="circle-minus" class="flag"></i>{% endif %}</td>
           </tr>
         {% empty %}
-          <tr><td colspan="9"><div class="empty"><i data-lucide="search-x"></i>No transactions match these filters.</div></td></tr>
+          <tr><td colspan="8"><div class="empty"><i data-lucide="search-x"></i>No transactions match these filters.</div></td></tr>
         {% endfor %}
       </tbody>
     </table>

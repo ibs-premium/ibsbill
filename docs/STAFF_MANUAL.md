@@ -20,6 +20,8 @@ The dashboard lives at **`/dashboard/`** on the gateway server (for example `htt
 10. [What the statuses mean](#10-what-the-statuses-mean)
 11. [Troubleshooting](#11-troubleshooting)
 12. [For administrators](#12-for-administrators)
+13. [Adding an eBilling site](#13-adding-an-ebilling-site)
+14. [Updating the server](#14-updating-the-server)
 
 ---
 
@@ -116,13 +118,12 @@ If you see **Request not sent**, MTN refused the request. The message says why; 
 | App, Username, Device | Which system, account and meter the payment was for. |
 | Amount | The amount requested. |
 | Status | Successful, Pending or Failed. Hover over **Failed** to see the reason. |
-| Credited | A green tick when the meter has been credited. |
 
 **Export CSV** downloads the list with your current filters applied, including the **reason for failure**. The footer shows the total amount of the matching requests.
 
 ### A single payment
 
-Select a row to open it. The **Details** panel shows everything recorded, including the payer, the MTN transaction ID, the first response from MTN and, for a failed payment, the **reason for failure**. The **Lifecycle** panel shows each stage: request created, sent to MTN, final status, meter credited and eBilling notified. At the bottom, **Callbacks from MTN** lists every callback MTN sent about this payment and what the gateway made of it.
+Select a row to open it. The **Details** panel shows everything recorded, including the payer, the MTN transaction ID, the first response from MTN and, for a failed payment, the **reason for failure**. The **Lifecycle** panel shows each stage: request created, sent to MTN and final status. At the bottom, **Callbacks from MTN** lists every callback MTN sent about this payment and what the gateway made of it.
 
 ---
 
@@ -231,6 +232,15 @@ An application that runs on several servers needs all of their addresses. Enter 
 
 The table also shows how many requests each application has made and how much it has collected.
 
+### Where payment requests come from
+
+eBilling asks the gateway for a payment **from the customer's own browser**, not from the eBilling server. Two things follow from that:
+
+- The **Requesting IP** shown on a payment is the address of the customer's phone or computer. It changes from customer to customer and from network to network.
+- For that reason the IP check is **switched off** for now (`ENFORCE_APP_IP=False`). Do not register one address and turn it on, or most customers would be refused. The check becomes useful only if eBilling's developers move the request to their server, where the address is fixed.
+
+What protects the gateway meanwhile is the application **key**, the list of websites allowed to call it (see [Adding an eBilling site](#13-adding-an-ebilling-site)) and the limit on requests per minute. Because the key is sent from the browser, use a long random one (leave **Key** blank when registering) and replace weak keys such as `diamond` when the site's developers can change their side at the same time.
+
 ---
 
 ## 10. What the statuses mean
@@ -240,7 +250,6 @@ The table also shows how many requests each application has made and how much it
 | **Pending** | Sent to MTN and waiting for the customer, or the result hasn't reached us yet. | Wait a few minutes, then [check with MTN](#6-checking-payments-with-mtn). |
 | **Successful** | The customer approved and the money was collected. | Nothing on the gateway. The meter is credited on the eBilling side. |
 | **Failed** | The payment did not go through. The reason is shown on the payment (see below). | Ask the customer to try again with a new request. |
-| **Credited** (tick) | The meter has been marked as credited for this payment. | If a successful payment isn't credited, contact the eBilling team with the reference. |
 
 ### Reasons for a failed payment
 
@@ -256,7 +265,7 @@ MTN gives a reason with every failure. It is shown when you hover over **Failed*
 | MTN had a problem / MTN MoMo was unavailable | A fault on MTN's side. | Try again shortly. |
 | A configuration problem (collection account, currency, callback address) | Something is wrong in the gateway's MTN settings. | Tell an administrator. |
 
-MTN does not always say exactly what went wrong. A customer who never enters their PIN usually shows as *did not approve in time*, and a wrong PIN usually shows as *declined or wrong PIN*. Older failed payments may not have a reason recorded.
+MTN does not always say exactly what went wrong. A customer who never enters their PIN usually shows as *did not approve in time*, and a wrong PIN usually shows as *declined or wrong PIN*. Older failed payments usually have no reason: MTN stops returning it after a while, and the backfill described in section 12 recovered it for only a handful. Failures from now on keep their reason.
 
 ---
 
@@ -266,13 +275,14 @@ MTN does not always say exactly what went wrong. A customer who never enters the
 |---|---|
 | *Could not get an access token from MTN* | The gateway couldn't sign in to MTN. Usually the MTN credentials are wrong or MTN is down. Tell an administrator. |
 | *Enter a valid MTN MoMo number* | The number isn't 10 digits starting with 0, or 12 digits starting with 233, or isn't an MTN number. |
+| eBilling shows *MoMo payment not started: The MoMo gateway could not be reached* | The customer's browser was stopped before the request reached the gateway. Almost always the eBilling site's address is missing from `CORS_ALLOWED_ORIGINS` (see section 13). Press F12 in the browser, open **Console**, and retry: the red error names the address that was refused. If nothing is blocked, check that eBilling's `MOMO_REQUEST_URL` is `https://ibsbill.org/bill/`. |
 | *Choose a registered application* | The application you picked isn't registered. Add it on **Applications**. |
 | An application is told *Invalid application credentials* | Its name, key or IP address doesn't match what is registered. Check the **Applications** page, or ask the application's developers to check what they send. |
 | *Too many requests* | An application, or one IP address, sent far more requests than normal in a minute. Wait a minute and try again. |
 | Payment stuck on **Pending** | The customer hasn't answered, or MTN's result didn't arrive. Use **Check status with MTN**. |
 | Payer shows **Name unavailable** | MTN didn't return a name for that number. The payment is not affected. |
 | Payer shows **—** | Older payment with no number recorded. Checking it with MTN fills it in. |
-| A failed payment shows no reason | MTN didn't give one, or it is an older payment. An administrator can fill in the missing ones (see below). |
+| A failed payment shows no reason | MTN didn't give one, or it is an older payment. Reasons for old payments usually cannot be recovered. |
 | Signed out unexpectedly | Your session expired. Sign in again. |
 
 ---
@@ -300,7 +310,17 @@ python manage.py recheck_pending                    # record results
 python manage.py recheck_pending --fail-not-found   # also fail requests MTN has no record of
 ```
 
-It skips requests less than 10 minutes old (change with `--older-than MINUTES`). It is safe to schedule: on a Linux server, copy the two files in the `deploy/` folder to `/etc/systemd/system/` and run `systemctl enable --now ibsbill-recheck.timer` to run it every 15 minutes (cron or Windows Task Scheduler work too).
+It skips requests less than 10 minutes old (change with `--older-than MINUTES`). It is safe to schedule. On the live server this runs automatically every 15 minutes (`ibsbill-recheck.timer`). To install it on a new server, copy the two files in the `deploy/` folder to `/etc/systemd/system/`, make sure `User=`, `WorkingDirectory=` and the python path in `ibsbill-recheck.service` match the server, then run `sudo systemctl daemon-reload` and `sudo systemctl enable --now ibsbill-recheck.timer`.
+
+Check it with:
+
+```
+systemctl list-timers | grep ibsbill            # shows the next run
+sudo systemctl start ibsbill-recheck.service    # run it now
+sudo journalctl -u ibsbill-recheck.service -n 20 --no-pager
+```
+
+A normal run says `No pending payments to check.`
 
 To add the failure reason to older failed payments that don't have one:
 
@@ -309,6 +329,8 @@ python manage.py recheck_pending --backfill-reasons --dry-run   # preview
 python manage.py recheck_pending --backfill-reasons
 ```
 
+Run this once at most. MTN no longer gives a reason for older payments, so running it again finds nothing new.
+
 ### Settings an administrator may change
 
 These go in the server's `.env` file (see [README.md](../README.md)):
@@ -316,7 +338,110 @@ These go in the server's `.env` file (see [README.md](../README.md)):
 | Setting | Effect |
 |---|---|
 | `COLLECTION_FEE_PERCENT` | The deduction shown in reports (default 1). |
-| `ENFORCE_APP_IP` | Whether a payment request must come from the application's registered IP address (default on). |
+| `CORS_ALLOWED_ORIGINS` | The eBilling websites allowed to ask for payments, separated by commas with no spaces, for example `https://diamondhostel.ebilling.ibsgh.com`. Each is `https://` plus the host name only: no path and no trailing `/`. **A site not listed here cannot take payments.** |
+| `ENFORCE_APP_IP` | Whether a payment request must come from the application's registered IP address. **Keep it `False`** while eBilling calls from customers' browsers (see section 9). |
 | `TRUSTED_PROXY_COUNT` | How many web servers sit in front of the gateway (default 1), so the real IP address is read correctly. |
+| `MTN_CALLBACK_URL` | The public HTTPS address MTN calls with results: `https://ibsbill.org/bill/mtn-callback/`. |
+| `CACHE_DIR` | Folder shared by the gateway's workers (default `./cache`, i.e. `/srv/ibsbill/cache`). It must be owned by the user the gateway runs as, with mode 700. A wrong owner makes every payment request fail with a server error. |
+| `DB_ENGINE` | `sqlite` or `postgresql` (production). |
+
+After changing `.env`, restart the gateway: `sudo systemctl restart ibsbill`.
+
+---
+
+## 13. Adding an eBilling site
+
+A site can take payments only when **three things** agree: the gateway allows its address, it is registered as an application, and its own settings carry that application's name and key. Do them in this order, and test each site before starting the next.
+
+Sites known so far: `diamondhostel` (live). Still to be added: `templesi`, `umat`, `mtnlo`, `signature`, `wesleytowers`, `alliedheights`, `capitalplace`.
+
+**1. Find the site's exact address.** Open its eBilling in a browser and copy what is in the address bar, scheme and host only: `https://diamondhostel.ebilling.ibsgh.com`.
+
+**2. Allow it on the gateway.** On the server, edit `/srv/ibsbill/.env` and add the address to `CORS_ALLOWED_ORIGINS`, keeping the existing ones, separated by commas with no spaces:
+
+```
+CORS_ALLOWED_ORIGINS=https://diamondhostel.ebilling.ibsgh.com,https://templesi.ebilling.ibsgh.com
+```
+
+Then `sudo systemctl restart ibsbill`, and check it:
+
+```
+curl -s -i -X OPTIONS https://ibsbill.org/bill/ \
+  -H "Origin: https://templesi.ebilling.ibsgh.com" \
+  -H "Access-Control-Request-Method: POST" \
+  -H "Access-Control-Request-Headers: content-type" | grep -i access-control
+```
+
+You should see `access-control-allow-origin:` followed by the site's address. If nothing is printed, the address is not matched exactly.
+
+**3. Register it.** In the dashboard open **Applications** and add the site. Use a name like `templesi-ebilling`, its web address, the site server's address in **IP addresses allowed** (for example `10.8.0.11`; it is not enforced now but must be valid), and leave **Key** blank. Copy the key that is generated.
+
+**4. Give the site its settings.** In that site's eBilling configuration set the application name, the key, and `MOMO_REQUEST_URL=https://ibsbill.org/bill/` (HTTPS, with the trailing slash). Restart its eBilling if needed.
+
+**5. Test.** Make a small real payment from the site, and check on **Transactions** that it appears under the right application and settles. If eBilling says *the MoMo gateway could not be reached*, see [Troubleshooting](#11-troubleshooting).
+
+### Replacing a key
+
+Change the key on **Applications** (edit, clear the key, save, copy the new one) and update the site's eBilling at the same moment. Between the two steps payments from that site are refused, so do it at a quiet time and make a test payment straight after.
+
+---
+
+## 14. Updating the server
+
+Do these on the live server, in `/srv/ibsbill`, as the deployment user.
+
+**1. Back up the database first.** Some updates change the database permanently.
+
+```
+pg_dump DBNAME > ~/ibsbill-$(date +%F).sql        # PostgreSQL
+cp db.sqlite3 ~/db.sqlite3.bak-$(date +%F)        # SQLite
+```
+
+**2. Get the new code and its requirements.**
+
+```
+git pull origin main
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+**3. Check the settings.** Compare `.env` with the table in section 12 and add anything new. The cache folder must exist and belong to the gateway's user:
+
+```
+systemctl cat ibsbill | grep -E "^(User|Group)="
+sudo mkdir -p /srv/ibsbill/cache
+sudo chown <User>:<Group> /srv/ibsbill/cache
+sudo chmod 700 /srv/ibsbill/cache
+```
+
+**4. Update the database and static files, then restart.**
+
+```
+python manage.py migrate
+python manage.py collectstatic --noinput
+python manage.py check
+sudo systemctl restart ibsbill
+sudo systemctl status ibsbill --no-pager
+```
+
+**5. Check it works.** Hard-refresh the dashboard (Ctrl+Shift+R) so the new stylesheet loads, then test the payment path without spending money:
+
+```
+curl -s -i -X POST https://ibsbill.org/bill/ -H "Content-Type: application/json" \
+  -d '{"app":"diamond-ebilling","app_key":"<key>","amount":0,"momo_number":"0241234567","device_id":"TEST"}'
+```
+
+`400 Invalid amount!` means the gateway is healthy. `403` means the name or key is wrong, `500` usually means the cache folder's owner is wrong, and `429` means too many requests.
+
+### When something is wrong
+
+| Look at | Command | What it tells you |
+|---|---|---|
+| The gateway's log | `sudo journalctl -u ibsbill -f` | Every request and any error. Retry the payment while watching. |
+| nginx | `sudo tail -f /var/log/nginx/access.log \| grep /bill` | Whether payment requests arrive at all, and the answer given. |
+| nginx errors | `sudo tail -n 30 /var/log/nginx/error.log` | Problems reaching the gateway or the eBilling servers. |
+| The timer | `systemctl list-timers \| grep ibsbill` | That stuck payments are being settled. |
+
+A payment attempt that shows only an `OPTIONS /bill/` line and no `POST /bill/` was blocked by the browser: the site is missing from `CORS_ALLOWED_ORIGINS`.
 
 See [README.md](../README.md) for installation, configuration and the API used by eBilling.

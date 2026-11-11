@@ -51,8 +51,6 @@ class EBill(models.Model):
     device_id = models.CharField(max_length=255, verbose_name='Device Id, e.g. Meter serial number')
     momo_number = models.CharField(max_length=15, blank=True, default='', verbose_name='Payer MoMo number')
     momo_name = models.CharField(max_length=255, blank=True, default='', verbose_name='Payer MoMo name')
-    balance_before = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    balance_after = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
 
     # MTN MoMo request state
     request_sent = models.BooleanField(default=False)
@@ -67,12 +65,6 @@ class EBill(models.Model):
     transaction_complete = models.BooleanField(default=False)
     request_datetime = models.DateTimeField(auto_now_add=True)
     request_completed_datetime = models.DateTimeField(null=True, blank=True)
-
-    # Idempotency & webhook
-    credited = models.BooleanField(default=False, verbose_name='Has meter been credited?')
-    webhook_url = models.CharField(max_length=500, null=True, blank=True,
-                                   verbose_name='eBilling webhook URL to notify on completion')
-    webhook_notified = models.BooleanField(default=False, verbose_name='Has eBilling been notified via webhook?')
 
     def __str__(self):
         return f"Request from {self.app} | {self.uuid} | {self.request_datetime}"

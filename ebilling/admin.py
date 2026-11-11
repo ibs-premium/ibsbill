@@ -26,8 +26,8 @@ class ApplicationAdmin(admin.ModelAdmin):
 @admin.register(EBill)
 class EBillAdmin(admin.ModelAdmin):
     list_display = ('request_datetime', 'app', 'device_id', 'momo_number', 'amount', 'status_badge',
-                    'transaction_complete', 'credited')
-    list_filter = ('status', 'failure_reason', 'transaction_complete', 'credited', 'app')
+                    'transaction_complete')
+    list_filter = ('status', 'failure_reason', 'transaction_complete', 'app')
     search_fields = ('uuid', 'device_id', 'momo_number', 'momo_name', 'financial_transaction_id', 'username')
     date_hierarchy = 'request_datetime'
     ordering = ('-request_datetime',)
@@ -35,12 +35,10 @@ class EBillAdmin(admin.ModelAdmin):
     save_on_top = True
     readonly_fields = ('uuid', 'request_datetime', 'request_completed_datetime')
     fieldsets = (
-        ('Payment', {'fields': ('app', 'device_id', 'amount', 'status', 'failure_reason', 'transaction_complete', 'credited')}),
+        ('Payment', {'fields': ('app', 'device_id', 'amount', 'status', 'failure_reason', 'transaction_complete')}),
         ('Payer', {'fields': ('momo_number', 'momo_name', 'username')}),
-        ('Balance', {'fields': ('balance_before', 'balance_after')}),
         ('MTN', {'fields': ('uuid', 'financial_transaction_id', 'request_sent',
                             'momo_api_initial_status_code', 'momo_api_initial_message')}),
-        ('Webhook', {'fields': ('webhook_url', 'webhook_notified')}),
         ('Timing', {'fields': ('request_datetime', 'request_completed_datetime')}),
         ('Technical details', {'fields': ('app_ip', 'app_url'), 'classes': ('collapse',)}),
     )

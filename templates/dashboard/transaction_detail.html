@@ -28,11 +28,9 @@
       <dt>Device ID</dt><dd class="mono">{{ bill.device_id }}</dd>
       {% if bill.status == 'FAILED' %}<dt>Reason for failure</dt><dd>{{ bill.failure_reason|failure_text|default:"Not reported by MTN" }}{% if bill.failure_reason %} <span class="muted mono">({{ bill.failure_reason }})</span>{% endif %}</dd>{% endif %}
       <dt>MoMo transaction ID</dt><dd class="mono">{{ bill.financial_transaction_id|default:"—" }}</dd>
-      <dt>Balance before / after</dt><dd>{{ bill.balance_before|money }} → {% if bill.balance_after is not None %}{{ bill.balance_after|money }}{% else %}—{% endif %}</dd>
       <dt>Initial MoMo response</dt><dd>{{ bill.momo_api_initial_status_code|default:"—" }} · {{ bill.momo_api_initial_message|default:"—" }}</dd>
       <dt>Requesting IP</dt><dd class="mono">{{ bill.app_ip }}</dd>
       <dt>Request URL</dt><dd class="mono">{{ bill.app_url }}</dd>
-      <dt>Webhook URL</dt><dd class="mono">{{ bill.webhook_url|default:"—" }}</dd>
     </dl>
   </section>
 
@@ -55,16 +53,6 @@
           <div class="title">Payment {{ bill.status|lower }}</div>
           {% if bill.status == 'FAILED' and bill.failure_reason %}<div class="when">{{ bill.failure_reason|failure_text }}</div>{% endif %}
           <div class="when">{{ bill.request_completed_datetime|date:"d M Y, H:i:s"|default:"Awaiting final status" }}</div>
-        </li>
-        <li>
-          <span class="dot {% if bill.credited %}on{% endif %}"></span>
-          <div class="title">Meter credited</div>
-          <div class="when">{{ bill.credited|yesno:"Yes,Not yet" }}</div>
-        </li>
-        <li>
-          <span class="dot {% if bill.webhook_notified %}on{% endif %}"></span>
-          <div class="title">eBilling notified</div>
-          <div class="when">{{ bill.webhook_notified|yesno:"Yes,Not yet" }}</div>
         </li>
       </ul>
     </div>

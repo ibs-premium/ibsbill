@@ -66,7 +66,8 @@ EMAIL_HOST_PASSWORD=<app password>
 | `MTN_ENVIRONMENT` | MTN target environment (e.g. `mtnghana`, or `sandbox` for testing). |
 | `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD` | SMTP login (Gmail) for outgoing mail. |
 | `TRUSTED_PROXY_COUNT` | Reverse proxies (nginx) in front of the app; default `1`, use `0` with none. Used to read the caller's real IP. |
-| `ENFORCE_APP_IP` | Default `True`: `/bill/` only accepts an application from the IP addresses registered for it (a list of addresses and ranges such as `10.0.4.170, 10.0.5.0/24`). |
+| `CORS_ALLOWED_ORIGINS` | Comma-separated eBilling site origins (`https://host`, no path, no trailing slash) allowed to call `/bill/` from a browser. eBilling calls from the customer's browser, so a site not listed here cannot take payments. |
+| `ENFORCE_APP_IP` | Default `True`, but set it `False` while eBilling calls from customers' browsers (the caller's IP is then the customer's own). When on: `/bill/` only accepts an application from the IP addresses registered for it (a list of addresses and ranges such as `10.0.4.170, 10.0.5.0/24`). |
 | `COLLECTION_FEE_PERCENT` | Deduction shown in the reports (default `1`). |
 | `DB_ENGINE` | `sqlite` (default) or `postgresql`. For PostgreSQL also set `DB_NAME`, `DB_USER`, `DB_PASSWORD` (and `DB_HOST`, `DB_PORT`) and run `pip install "psycopg[binary]"`. Use PostgreSQL in production. |
 | `CACHE_DIR` | Where the shared cache lives (default `./cache`). Holds the MTN token and the rate-limit counters, so all gunicorn workers must be able to read and write it. |
@@ -81,7 +82,7 @@ python manage.py runserver
 
 Open <http://127.0.0.1:8000/dashboard/> and sign in. `/` redirects to the dashboard.
 
-Register each calling system (e.g. `diamond-ebilling`) under **Applications** before it calls the API.
+Register each calling system (e.g. `diamond-ebilling`) under **Applications** before it calls the API, and add its site to `CORS_ALLOWED_ORIGINS`. See section 13 of the staff manual for the full steps, and section 14 for updating a live server.
 
 ## How a payment works
 

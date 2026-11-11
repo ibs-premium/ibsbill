@@ -37,7 +37,7 @@ PRODUCT = 'eBilling MoMo Gateway'
 SUBTITLE = ('How to take MTN Mobile Money payments, follow up payments that are stuck, '
             'and produce reports from the gateway dashboard.')
 ADDRESS = '/dashboard/ on the gateway server'
-VERSION = 'Version 1.1 · November 2026'
+VERSION = 'Version 1.2 · November 2026'
 RIGHTS = 'All rights reserved. www.ibsgh.com'
 GREEN = '017A3D'
 GREEN_DARK = '015C2E'
